@@ -9,7 +9,6 @@ and pretending otherwise costs more than it saves.
 """
 
 import asyncio
-import contextlib
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -33,6 +32,22 @@ def backoff_delay(
     """
     ceiling: float = min(maximum, base * 2 ** min(attempt, 16))
     return ceiling * (0.5 + 0.5 * rng())
+
+
+async def cancel_and_wait(task: asyncio.Task[None]) -> None:
+    """Cancel `task` and wait for it to end, without swallowing our own cancellation.
+
+    The CancelledError that `task` ends with is expected and absorbed. One
+    aimed at the caller, which arrives at the same `await`, is re-raised, so a
+    caller cancelled while tearing down still learns it was cancelled.
+    """
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise
 
 
 class Connection:
@@ -61,11 +76,17 @@ class Connection:
         self._writer: asyncio.StreamWriter | None = None
         self._task: asyncio.Task[None] | None = None
         self._connected = False
+        self._ready = False
         self.resyncs = 0
 
     @property
     def connected(self) -> bool:
-        return self._connected
+        """Open, and through the connect hook: ready for the caller's commands.
+
+        The hook itself sends before this is true; `send` only needs the
+        socket.
+        """
+        return self._ready
 
     @property
     def local_ip(self) -> str | None:
@@ -97,12 +118,12 @@ class Connection:
         self._task = asyncio.create_task(self._run(), name=f"aiolibresync-{self.port}")
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        self._close_writer()
+        task, self._task = self._task, None
+        try:
+            if task is not None:
+                await cancel_and_wait(task)
+        finally:
+            self._close_writer()
 
     def drop(self) -> None:
         """Force the current socket down; `_run` reconnects and re-runs on_connect.
@@ -147,12 +168,15 @@ class Connection:
 
             self._writer = writer
             self._connected = True
-            self._notify_availability(True)
             _LOGGER.debug("connected to %s:%s", self.host, self.port)
             proved = False
             try:
                 if self._on_connect is not None:
                     await self._on_connect(self)
+                # Only now: on 7777 the hook is the session registration, and a
+                # command before it would be refused.
+                self._ready = True
+                self._notify_availability(True)
                 proved = await self._read_loop(reader)
             except (OSError, asyncio.IncompleteReadError) as err:
                 _LOGGER.debug("%s:%s dropped: %s", self.host, self.port, err)
@@ -162,7 +186,7 @@ class Connection:
             except Exception:
                 _LOGGER.exception("connect hook or read loop failed on %s:%s", self.host, self.port)
             finally:
-                self._connected = False
+                self._connected = self._ready = False
                 self._close_writer()
                 self._notify_availability(False)
             # A hub that accepts and drops without ever sending has not proved

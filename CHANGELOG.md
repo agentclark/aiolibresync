@@ -3,6 +3,9 @@
 ## 0.5.0 — unreleased
 
 - `async_connect(timeout=...)` waits until both ports are open and raises `NotConnectedError` if they are not in time. On that error, and on cancellation, it disconnects again first, so a failed attempt leaves no reconnect loop or poll running. Without `timeout` it behaves as before.
+- `state.available` and `Connection.connected` turn true only once the connect-time sequence has run, which on 7777 is the session registration. Before, they turned true at the TCP connect, and a command sent at once could be refused as unregistered.
+- `async_disconnect()` no longer swallows a cancellation aimed at its caller while it waits for the poll loop or a socket task to end.
+- `__version__` falls back to `0+unknown` when the package metadata is not installed.
 - A command's confirmation waiter is armed before the command is sent, so a reply that arrives while the write is still draining is no longer missed.
 - `async_probe_control` is exported: the control-port check on its own, for a caller that already has the device description.
 - `__version__` is read from the installed package metadata. It had been left at `0.2.0`.

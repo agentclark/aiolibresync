@@ -344,6 +344,33 @@ async def test_connect_with_a_timeout_returns_once_both_ports_are_open(hub):
     await client.async_disconnect()
 
 
+async def test_available_waits_for_the_7777_registration(hub):
+    """A command issued as soon as `available` is true must find the session
+    registered, or the hub refuses it with status 0x03."""
+    client = make_client(hub)
+    sent: list[bytes] = []
+    real_send = client._media.send
+
+    async def spy(*frames: bytes) -> None:
+        sent.extend(frames)
+        await real_send(*frames)
+
+    client._media.send = spy  # type: ignore[method-assign]
+    registered_when_available: list[bool] = []
+
+    def on_state(state: DeviceState) -> None:
+        if state.available and not registered_when_available:
+            registered_when_available.append(
+                any(media_command(f, from_device=False) == MID_REGISTER for f in sent)
+            )
+
+    client.subscribe(on_state)
+    await client.async_connect(timeout=2.0)
+
+    assert registered_when_available == [True]
+    await client.async_disconnect()
+
+
 async def test_connect_with_a_timeout_disconnects_before_raising(hub):
     """A setup that gives up must not leave two reconnect loops and a poll behind."""
     client = _one_dead_port_client(hub)

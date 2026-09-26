@@ -8,7 +8,6 @@ other clients are also driving.
 """
 
 import asyncio
-import contextlib
 import logging
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable
@@ -16,7 +15,7 @@ from dataclasses import asdict
 from typing import Any
 
 from . import media, systemcontrol
-from .connection import Connection
+from .connection import Connection, cancel_and_wait
 from .const import (
     CONFIRM_TIMEOUT,
     CONTROL_PORT,
@@ -169,14 +168,14 @@ class LibreSyncClient:
     async def async_disconnect(self) -> None:
         # Cancel the poll loop first: left running, it would outlive unload and
         # go on driving a client the integration has already discarded.
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._poll_task
-            self._poll_task = None
-        await self._control.stop()
-        await self._media.stop()
-        self._apply({"available": False})
+        task, self._poll_task = self._poll_task, None
+        try:
+            if task is not None:
+                await cancel_and_wait(task)
+        finally:
+            await self._control.stop()
+            await self._media.stop()
+            self._apply({"available": False})
 
     async def _poll_loop(self) -> None:
         """Poll the properties that announce nothing — on both sockets.

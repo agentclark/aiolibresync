@@ -8,7 +8,7 @@ from itertools import pairwise
 import pytest
 from conftest import until
 
-from aiolibresync.connection import Connection, backoff_delay
+from aiolibresync.connection import Connection, backoff_delay, cancel_and_wait
 from aiolibresync.exceptions import NotConnectedError
 from aiolibresync.frames import ControlFrameReader
 
@@ -243,3 +243,30 @@ async def test_a_raising_availability_handler_does_not_stop_reconnection():
     await conn.stop()
     server.close()
     await server.wait_closed()
+
+
+async def test_cancel_and_wait_keeps_the_callers_own_cancellation():
+    """A teardown that is itself cancelled must still end cancelled."""
+
+    async def slow_to_stop() -> None:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.1)  # winding down takes a moment
+            raise
+
+    inner = asyncio.create_task(slow_to_stop())
+    await asyncio.sleep(0)
+    outer = asyncio.create_task(cancel_and_wait(inner))
+    await asyncio.sleep(0.01)
+    outer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+
+async def test_cancel_and_wait_absorbs_the_tasks_cancellation():
+    inner = asyncio.create_task(asyncio.sleep(10))
+    await asyncio.sleep(0)
+    await cancel_and_wait(inner)
+    assert inner.cancelled()

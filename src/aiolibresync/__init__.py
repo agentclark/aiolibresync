@@ -42,9 +42,10 @@ Finding a hub, when its address is not already known:
 not return early on the first answer — and `async_probe(host)` performs the same
 identification for an address the user already has. `async_probe_control(host)`
 is the last of those steps alone, for a caller that already holds the device
-description, such as Home Assistant's own SSDP discovery. Both are read-only: a
-search, an HTTP GET of the device description, and a TCP connect to 50006 that
-sends nothing.
+description, such as Home Assistant's own SSDP discovery. All three are
+read-only: a search, an HTTP GET of the device description, and a TCP connect to
+50006 that sends nothing. `async_read_serial(host)` is not: it registers a
+session on 7777, so call it only for a host already believed to be a hub.
 
 The codec is importable on its own — `aiolibresync.frames`,
 `aiolibresync.systemcontrol`, `aiolibresync.media` — and does no I/O.
@@ -53,7 +54,7 @@ argument is a LUCI message-box id, and the box space includes factory reset.
 Use the named operations in `aiolibresync.media` instead.
 """
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 from .client import LibreSyncClient
 from .const import CONTROL_PORT, MEDIA_PORT, POLL_INTERVAL
@@ -72,7 +73,10 @@ from .exceptions import (
 )
 from .state import DeviceState, NowPlaying, PlayState, Source
 
-__version__ = version(__name__)
+try:
+    __version__ = version(__name__)
+except PackageNotFoundError:  # imported from a checkout that was never installed
+    __version__ = "0+unknown"
 
 __all__ = [
     "CONTROL_PORT",
