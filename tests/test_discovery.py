@@ -366,3 +366,18 @@ async def test_a_peer_that_never_registers_us_is_none_within_the_timeout():
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_a_reply_whose_location_names_another_host_is_ignored(monkeypatch):
+    """The description would speak for a machine other than the one probed."""
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        elsewhere = device.location().replace("127.0.0.1", "127.0.0.2")
+        device.location = lambda: elsewhere  # type: ignore[method-assign]
+        found = await _discover_against(monkeypatch, device)
+    finally:
+        await device.stop()
+
+    assert found == []
+    assert device.description_requests == []

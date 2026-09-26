@@ -182,6 +182,10 @@ SSDP_TTL: Final = 2  # one router hop, for the site that routes multicast
 SSDP_ATTEMPTS: Final = 3
 SSDP_RETRY_INTERVAL: Final = 1.0
 DISCOVERY_TIMEOUT: Final = 5.0
+#: Hosts one search follows up with an HTTP fetch, all at once. Far more
+#: renderers than a home has; the cap is for a sender that answers from many
+#: addresses, which would otherwise open that many connections.
+MAX_SSDP_CANDIDATES: Final = 64
 HTTP_TIMEOUT: Final = 5.0
 PROBE_TIMEOUT: Final = 3.0
 #: A device description is ~1.5 kB. This bound is what stops an unidentified

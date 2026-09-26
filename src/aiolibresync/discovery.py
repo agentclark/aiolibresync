@@ -33,6 +33,7 @@ from .const import (
     DISCOVERY_TIMEOUT,
     HTTP_TIMEOUT,
     MAX_DESCRIPTION_BYTES,
+    MAX_SSDP_CANDIDATES,
     MEDIA_PORT,
     MID_REGISTER,
     MID_SERIAL,
@@ -419,7 +420,12 @@ async def _async_msearch(
     timeout: float,  # noqa: ASYNC109 — see async_discover
     source_ip: str | None,
 ) -> dict[str, str]:
-    """Host to `LOCATION`, for everything that answered within `timeout`."""
+    """Host to `LOCATION`, for everything that answered within `timeout`.
+
+    A reply whose `LOCATION` names a host other than its sender is dropped: the
+    description would then speak for a different machine from the one probed
+    afterwards.
+    """
     loop = asyncio.get_running_loop()
     found: dict[str, str] = {}
 
@@ -427,9 +433,19 @@ async def _async_msearch(
         def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
             headers = parse_ssdp_headers(data)
             location = headers.get("location")
-            if location:
-                _LOGGER.debug("SSDP reply from %s: %s", addr[0], headers)
-                found.setdefault(str(addr[0]), location)
+            if not location:
+                return
+            host = str(addr[0])
+            _LOGGER.debug("SSDP reply from %s: %s", host, headers)
+            try:
+                named = urlsplit(location).hostname
+            except ValueError:
+                return
+            if named != host:
+                _LOGGER.debug("%s answered with a LOCATION on %s; ignored", host, named)
+                return
+            if host in found or len(found) < MAX_SSDP_CANDIDATES:
+                found.setdefault(host, location)
 
     transport, _protocol = await loop.create_datagram_endpoint(
         _Collector, local_addr=(source_ip or "0.0.0.0", 0), family=socket.AF_INET
