@@ -40,7 +40,9 @@ Finding a hub, when its address is not already known:
 
 `async_discover()` sends a multicast search and waits the full timeout — it does
 not return early on the first answer — and `async_probe(host)` performs the same
-identification for an address the user already has. Both are read-only: a
+identification for an address the user already has. `async_probe_control(host)`
+is the last of those steps alone, for a caller that already holds the device
+description, such as Home Assistant's own SSDP discovery. Both are read-only: a
 search, an HTTP GET of the device description, and a TCP connect to 50006 that
 sends nothing.
 
@@ -55,7 +57,13 @@ from importlib.metadata import version
 
 from .client import LibreSyncClient
 from .const import CONTROL_PORT, MEDIA_PORT, POLL_INTERVAL
-from .discovery import DiscoveredDevice, async_discover, async_probe, async_read_serial
+from .discovery import (
+    DiscoveredDevice,
+    async_discover,
+    async_probe,
+    async_probe_control,
+    async_read_serial,
+)
 from .exceptions import (
     ConfirmationTimeout,
     LibreSyncError,
@@ -82,5 +90,6 @@ __all__ = [
     "UnsafeCommandError",
     "async_discover",
     "async_probe",
+    "async_probe_control",
     "async_read_serial",
 ]
