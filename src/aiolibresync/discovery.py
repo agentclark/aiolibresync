@@ -1,0 +1,439 @@
+"""SSDP discovery, and the TCP probe that turns a MediaRenderer into a hub.
+
+Discovery lives here rather than in the integration's config flow so it is
+testable without Home Assistant and usable from any script.
+
+Three steps, in increasing order of cost:
+
+1. an SSDP `M-SEARCH` for `MediaRenderer:1` — a UDP datagram, sent more than
+   once because UDP loses them;
+2. the device description at the `LOCATION` header, which is the only place the
+   manufacturer and the UDN appear;
+3. a TCP connect to port 50006, which is what separates a LibreSync hub from
+   every other MediaRenderer on the network.
+
+Nothing here writes anything, and step 3 connects and closes **without sending a
+byte**: at that point the host has been identified by a description it served
+itself, which is not the same as being the device it claims to be.
+"""
+
+import asyncio
+import contextlib
+import logging
+import socket
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+from xml.etree import ElementTree
+
+from .const import (
+    CONTROL_PORT,
+    DESCRIPTION_PATH,
+    DISCOVERY_TIMEOUT,
+    HTTP_TIMEOUT,
+    MAX_DESCRIPTION_BYTES,
+    PROBE_TIMEOUT,
+    SSDP_ADDRESS,
+    SSDP_ATTEMPTS,
+    SSDP_MX,
+    SSDP_PORT,
+    SSDP_RETRY_INTERVAL,
+    SSDP_ST,
+    SSDP_TTL,
+    UPNP_PORT,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+#: What marks a description as ours, both lower-cased before comparison.
+#: `manufacturer` is the stock string on this unit. `modelDescription` is
+#: checked as well because a rebranded device is likely to carry its own brand
+#: as the manufacturer while keeping the LibreSync DMR string — and neither
+#: half is guaranteed, which is why the TCP probe is what actually confirms.
+_MANUFACTURER_MARK = "librewireless"
+_MODEL_DESCRIPTION_MARK = "libresync"
+
+_WANTED_TAGS = frozenset({"UDN", "friendlyName", "manufacturer", "modelName", "modelDescription"})
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceDescription:
+    """The five fields of a UPnP device description this library reads.
+
+    `serialNumber` is deliberately absent: it is the vendor placeholder
+    `1234567890` on this hardware, and a field that looks like an identifier but
+    is not is worse than no field at all. See docs/devices.md.
+    """
+
+    udn: str | None = None
+    friendly_name: str | None = None
+    manufacturer: str | None = None
+    model_name: str | None = None
+    model_description: str | None = None
+
+    @property
+    def is_libresync(self) -> bool:
+        """Whether this description is worth a TCP probe."""
+        return (
+            _MANUFACTURER_MARK in (self.manufacturer or "").lower()
+            or _MODEL_DESCRIPTION_MARK in (self.model_description or "").lower()
+        )
+
+
+def parse_description(payload: bytes) -> DeviceDescription | None:
+    """A UPnP device description, or None if `payload` is not one.
+
+    Namespaces are stripped rather than matched: the document declares
+    `urn:schemas-upnp-org:device-1-0` on this hub, and a rebranded device is
+    free to declare something else without ceasing to be a MediaRenderer.
+    """
+    if b"<!DOCTYPE" in payload.upper():
+        # An unidentified host on the network wrote this. A document type
+        # declaration is the entry point to the entity-expansion attacks
+        # ElementTree does not defend against, and no device description needs
+        # one.
+        _LOGGER.debug("Refusing a device description with a DOCTYPE")
+        return None
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError:
+        return None
+    fields: dict[str, str] = {}
+    for element in root.iter():
+        tag = element.tag.rpartition("}")[2]
+        if tag in _WANTED_TAGS and element.text and tag not in fields:
+            fields[tag] = element.text.strip()
+    if not fields:
+        return None
+    return DeviceDescription(
+        udn=fields.get("UDN"),
+        friendly_name=fields.get("friendlyName"),
+        manufacturer=fields.get("manufacturer"),
+        model_name=fields.get("modelName"),
+        model_description=fields.get("modelDescription"),
+    )
+
+
+def build_msearch(address: str, port: int, st: str, mx: int) -> bytes:
+    """One `M-SEARCH` datagram.
+
+    The target is an argument rather than a constant read inside because the
+    tests point the whole search at a responder on the loopback interface.
+    """
+    return (
+        "M-SEARCH * HTTP/1.1\r\n"
+        f"HOST: {address}:{port}\r\n"
+        'MAN: "ssdp:discover"\r\n'
+        f"MX: {mx}\r\n"
+        f"ST: {st}\r\n"
+        "\r\n"
+    ).encode()
+
+
+def parse_ssdp_headers(datagram: bytes) -> dict[str, str]:
+    """Header name, lower-cased, to value. The status line is discarded.
+
+    Anything that is not a header line is skipped rather than raising: this
+    parses whatever arrived on a UDP port, which is not necessarily SSDP and not
+    necessarily well formed.
+    """
+    text = datagram.decode("utf-8", errors="replace")
+    headers: dict[str, str] = {}
+    for line in text.splitlines()[1:]:
+        name, separator, value = line.partition(":")
+        if separator:
+            headers[name.strip().lower()] = value.strip()
+    return headers
+
+
+async def async_fetch_description(
+    url: str,
+    *,
+    # Not a deadline the caller can impose from outside: this function's
+    # contract is that it returns None instead of raising, and an
+    # `asyncio.timeout` around it would raise.
+    timeout: float = HTTP_TIMEOUT,  # noqa: ASYNC109
+) -> DeviceDescription | None:
+    """GET `url` and parse it, or None for anything that goes wrong.
+
+    Every failure is a None: an unreachable host, a refused connection, a 404, a
+    body too large, junk instead of XML. A control point that raises on any of
+    those turns one misbehaving device on the network into a failed scan.
+    """
+    payload = await _async_http_get(url, timeout=timeout, limit=MAX_DESCRIPTION_BYTES)
+    if payload is None:
+        return None
+    return parse_description(payload)
+
+
+async def _async_http_get(
+    url: str,
+    *,
+    timeout: float,  # noqa: ASYNC109 — see async_fetch_description
+    limit: int,
+) -> bytes | None:
+    parts = urlsplit(url)
+    if parts.scheme != "http" or not parts.hostname:
+        return None
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {parts.netloc}\r\n"
+        "Accept: text/xml\r\n"
+        "User-Agent: aiolibresync\r\n"
+        # The reply is read to EOF, so the server has to close it for us.
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode()
+    try:
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_connection(parts.hostname, parts.port or 80)
+            try:
+                writer.write(request)
+                await writer.drain()
+                raw = await _read_capped(reader, limit)
+            finally:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+    except (OSError, TimeoutError, ValueError):
+        _LOGGER.debug("No device description at %s", url)
+        return None
+    if raw is None:
+        _LOGGER.debug("The document at %s exceeds %d bytes; ignored", url, limit)
+        return None
+    return _http_body(raw)
+
+
+async def _read_capped(reader: asyncio.StreamReader, limit: int) -> bytes | None:
+    """Everything until EOF, or None once `limit` is exceeded."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await reader.read(4096)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+
+
+def _http_body(raw: bytes) -> bytes | None:
+    """The body of a 200 response, de-chunked if it needs to be."""
+    head, separator, body = raw.partition(b"\r\n\r\n")
+    if not separator:
+        return None
+    lines = head.decode("utf-8", errors="replace").splitlines()
+    status = lines[0].split()
+    if len(status) < 2 or status[1] != "200":
+        return None
+    headers = {
+        name.strip().lower(): value.strip()
+        for name, separator, value in (line.partition(":") for line in lines[1:])
+        if separator
+    }
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        return _dechunk(body)
+    return body
+
+
+def _dechunk(body: bytes) -> bytes | None:
+    out = bytearray()
+    while True:
+        line, separator, rest = body.partition(b"\r\n")
+        if not separator:
+            return None
+        try:
+            size = int(line.split(b";", 1)[0].strip(), 16)
+        except ValueError:
+            return None
+        if size == 0:
+            return bytes(out)
+        if len(rest) < size + 2:
+            return None
+        out += rest[:size]
+        body = rest[size + 2 :]
+
+
+async def async_probe_control(
+    host: str,
+    port: int = CONTROL_PORT,
+    *,
+    # Returns False rather than raising, so the caller cannot express this
+    # with `asyncio.timeout`.
+    timeout: float = PROBE_TIMEOUT,  # noqa: ASYNC109
+) -> bool:
+    """Whether something accepts a TCP connection on the System Control port.
+
+    Connects and closes without sending a byte. This is the confirmation step of
+    discovery, and at this point the host is a stranger that served a plausible
+    description — writing to it would be a probe of an unidentified device,
+    which is exactly what this library refuses to do.
+    """
+    try:
+        async with asyncio.timeout(timeout):
+            _reader, writer = await asyncio.open_connection(host, port)
+    except (OSError, TimeoutError):
+        return False
+    writer.close()
+    with contextlib.suppress(OSError, TimeoutError):
+        await writer.wait_closed()
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredDevice:
+    """A hub on the network, with the identity a config entry needs.
+
+    `udn` is the `unique_id`: it survived seven months, a reboot and a subnet
+    change, and it is what SSDP carries in its `USN`. It is None only on the
+    manual path, when the address is known but the UPnP renderer did not answer
+    — see `async_probe`. A factory reset mints a new one and orphans the entry,
+    which is a documentation item rather than something to detect.
+    """
+
+    host: str
+    udn: str | None = None
+    name: str | None = None
+    model: str | None = None
+    manufacturer: str | None = None
+    description_url: str | None = None
+    control_port: int = CONTROL_PORT
+
+
+async def async_discover(
+    *,
+    # A collection window, not a deadline. The search waits this out on
+    # purpose and returns what it gathered; cancelling it from outside with
+    # `asyncio.timeout` would throw those results away.
+    timeout: float = DISCOVERY_TIMEOUT,  # noqa: ASYNC109
+    source_ip: str | None = None,
+) -> list[DiscoveredDevice]:
+    """Every LibreSync hub that answers an SSDP search on this network.
+
+    Waits the full `timeout` rather than returning on the first answer: there is
+    no count to wait for, and a second hub is always allowed to be slower.
+
+    `source_ip` selects the interface to search from, which matters on a machine
+    with more than one — without it the search leaves by whichever interface the
+    routing table picks for multicast, and a hub on the other one is never
+    found.
+    """
+    candidates = await _async_msearch(timeout=timeout, source_ip=source_ip)
+    identified = await asyncio.gather(
+        *(_async_identify(host, location) for host, location in candidates.items())
+    )
+    devices: dict[str, DiscoveredDevice] = {}
+    for device in identified:
+        if device is not None:
+            # Two addresses for one UDN is one device on two interfaces, and a
+            # config entry keyed on the UDN can only have one of them.
+            devices.setdefault(device.udn or device.host, device)
+    return list(devices.values())
+
+
+async def _async_identify(host: str, location: str) -> DiscoveredDevice | None:
+    description = await async_fetch_description(location)
+    if description is None:
+        return None
+    if not description.is_libresync:
+        _LOGGER.debug("%s is a %s renderer, not ours", host, description.manufacturer)
+        return None
+    if not await async_probe_control(host, CONTROL_PORT):
+        _LOGGER.debug("%s looks like ours but port %d is closed", host, CONTROL_PORT)
+        return None
+    return DiscoveredDevice(
+        host=host,
+        udn=description.udn,
+        name=description.friendly_name,
+        model=description.model_name,
+        manufacturer=description.manufacturer,
+        description_url=location,
+        control_port=CONTROL_PORT,
+    )
+
+
+async def _async_msearch(
+    *,
+    timeout: float,  # noqa: ASYNC109 — see async_discover
+    source_ip: str | None,
+) -> dict[str, str]:
+    """Host to `LOCATION`, for everything that answered within `timeout`."""
+    loop = asyncio.get_running_loop()
+    found: dict[str, str] = {}
+
+    class _Collector(asyncio.DatagramProtocol):
+        def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
+            headers = parse_ssdp_headers(data)
+            location = headers.get("location")
+            if location:
+                _LOGGER.debug("SSDP reply from %s: %s", addr[0], headers)
+                found.setdefault(str(addr[0]), location)
+
+    transport, _protocol = await loop.create_datagram_endpoint(
+        _Collector, local_addr=(source_ip or "0.0.0.0", 0), family=socket.AF_INET
+    )
+    try:
+        sock = transport.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, SSDP_TTL)
+            if source_ip:
+                sock.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(source_ip)
+                )
+        message = build_msearch(SSDP_ADDRESS, SSDP_PORT, SSDP_ST, SSDP_MX)
+        deadline = loop.time() + timeout
+        for _attempt in range(SSDP_ATTEMPTS):
+            transport.sendto(message, (SSDP_ADDRESS, SSDP_PORT))
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            # The replies arrive on the protocol's callback; this sleep is what
+            # gives the event loop the chance to run it.
+            await asyncio.sleep(min(SSDP_RETRY_INTERVAL, remaining))
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+    finally:
+        transport.close()
+    return found
+
+
+async def async_probe(
+    host: str,
+    *,
+    port: int = 0,
+    timeout: float = PROBE_TIMEOUT,  # noqa: ASYNC109 — see async_probe_control
+) -> DiscoveredDevice | None:
+    """Identify a hub at a known address — the config flow's manual path.
+
+    None means nothing answered on the System Control port, which is the only
+    thing that makes an address unusable. A device that answers but whose UPnP
+    renderer does not comes back with `udn` None: it is reachable and
+    controllable, and only its identity is missing.
+
+    `port` overrides the control port for tests; leave it at 0 for the real one.
+    """
+    control_port = port or CONTROL_PORT
+    if not await async_probe_control(host, control_port, timeout=timeout):
+        return None
+    # There is no LOCATION header on this path, so the description URL is the
+    # one the hub has always served. `URLBase` inside the document is
+    # no help: it is baked at boot and still carries the hub's old address.
+    location = f"http://{host}:{UPNP_PORT}{DESCRIPTION_PATH}"
+    description = await async_fetch_description(location, timeout=timeout)
+    if description is None:
+        _LOGGER.debug("%s answers on %d but served no description", host, control_port)
+        return DiscoveredDevice(host=host, control_port=control_port)
+    return DiscoveredDevice(
+        host=host,
+        udn=description.udn,
+        name=description.friendly_name,
+        model=description.model_name,
+        manufacturer=description.manufacturer,
+        description_url=location,
+        control_port=control_port,
+    )

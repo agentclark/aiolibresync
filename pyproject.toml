@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aiolibresync"
+version = "0.3.0"
+description = "Async client for Libre Wireless LibreSync audio hubs, such as the Platin Stereo Hub"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Alessandro Zarrilli" }]
+keywords = ["libresync", "libre wireless", "platin", "wisa", "home assistant", "asyncio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    # Pinned to a minor range, unlike the others: `ruff format --check .` is a
+    # CI gate, so a release that changes formatting style would fail the build
+    # on code nobody touched.
+    "ruff>=0.16.3,<0.17",
+    "mypy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/drsound/aiolibresync"
+Documentation = "https://github.com/drsound/aiolibresync/tree/main/docs"
+Issues = "https://github.com/drsound/aiolibresync/issues"
+Changelog = "https://github.com/drsound/aiolibresync/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aiolibresync"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "docs", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# The formatter would otherwise reach Python blocks inside the documentation.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/aiolibresync"]

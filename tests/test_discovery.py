@@ -1,0 +1,326 @@
+"""Discovery: the parsers against the golden file, the sockets against a fake.
+
+`fixtures/upnp-device-description.xml` is the description a real hub served
+in January 2026. Every field the config flow needs is asserted against it, so a
+parser that stops recognising a real document fails here rather than on someone
+else's network.
+"""
+
+import asyncio
+import contextlib
+from pathlib import Path
+
+from fakes import FakeHTTPServer, FakeSSDPDevice
+
+from aiolibresync import discovery
+
+CAPTURES = Path(__file__).parent / "fixtures"
+DESCRIPTION = (CAPTURES / "upnp-device-description.xml").read_bytes()
+
+UDN = "uuid:1a2b3c4d-5e6f-11f0-9193-0123456789ab"
+#: The `friendlyName` in that file. It is one unit's name and the owner may
+#: change it — what is asserted is that the parser reads the field out of the
+#: document, never that a device on someone's network is called this.
+FRIENDLY_NAME = "Stereo"
+
+SONOS_DESCRIPTION = b"""<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0"><device>
+<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+<friendlyName>Kitchen</friendlyName><manufacturer>Sonos, Inc.</manufacturer>
+<modelName>Sonos One</modelName><modelDescription>Sonos One</modelDescription>
+<UDN>uuid:aaaaaaaa-0000-0000-0000-000000000000</UDN>
+</device></root>"""
+
+
+def test_parses_the_real_device_description():
+    desc = discovery.parse_description(DESCRIPTION)
+
+    assert desc is not None
+    assert desc.udn == UDN
+    assert desc.friendly_name == FRIENDLY_NAME
+    assert desc.manufacturer == "LibreWireless"
+    assert desc.model_name == "LibreWireless"
+    assert desc.model_description == "LibreSyncDMR"
+    assert desc.is_libresync
+
+
+def test_the_serial_number_is_not_read():
+    # It is the vendor placeholder 1234567890 on every unit. Reading it at all
+    # would invite using it as an identifier.
+    assert not hasattr(discovery.parse_description(DESCRIPTION), "serial_number")
+
+
+def test_another_vendors_renderer_is_not_ours():
+    desc = discovery.parse_description(SONOS_DESCRIPTION)
+
+    assert desc is not None
+    assert desc.manufacturer == "Sonos, Inc."
+    assert not desc.is_libresync
+
+
+def test_a_rebranded_device_is_recognised_by_its_model_description():
+    # The manufacturer is the brand's, and the stock DMR string survives. Both
+    # halves of the filter exist because neither is guaranteed on its own.
+    xml = b"""<?xml version="1.0"?>
+    <root xmlns="urn:schemas-upnp-org:device-1-0"><device>
+    <friendlyName>A500</friendlyName><manufacturer>Buchardt Audio</manufacturer>
+    <modelName>A500</modelName><modelDescription>LibreSyncDMR</modelDescription>
+    <UDN>uuid:bbbbbbbb-0000-0000-0000-000000000000</UDN>
+    </device></root>"""
+
+    desc = discovery.parse_description(xml)
+
+    assert desc is not None
+    assert desc.is_libresync
+
+
+def test_a_document_type_declaration_is_refused():
+    # This parses a reply from a host nobody has identified yet.
+    xml = b"""<?xml version="1.0"?><!DOCTYPE root [<!ENTITY a "x">]>
+    <root xmlns="urn:schemas-upnp-org:device-1-0"><device>
+    <friendlyName>&a;</friendlyName></device></root>"""
+
+    assert discovery.parse_description(xml) is None
+
+
+def test_junk_is_not_a_description():
+    assert discovery.parse_description(b"<html>404</html>") is None
+    assert discovery.parse_description(b"not xml at all") is None
+    assert discovery.parse_description(b"") is None
+
+
+SSDP_REPLY = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"CACHE-CONTROL: max-age=1800\r\n"
+    b"EXT:\r\n"
+    b"LOCATION: http://192.168.10.50:38400/description.xml\r\n"
+    b"SERVER: Platform 1.0 CyberLinkC/3.0 UPnP/1.0 DLNADOC/1.50\r\n"
+    b"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+    b"USN: uuid:1a2b3c4d-5e6f-11f0-9193-0123456789ab::"
+    b"urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+    b"\r\n"
+)
+
+
+def test_the_search_asks_for_a_mediarenderer():
+    message = discovery.build_msearch("239.255.255.250", 1900, discovery.SSDP_ST, 2)
+
+    assert message.startswith(b"M-SEARCH * HTTP/1.1\r\n")
+    assert b"HOST: 239.255.255.250:1900\r\n" in message
+    assert b'MAN: "ssdp:discover"\r\n' in message
+    assert b"MX: 2\r\n" in message
+    assert b"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" in message
+    assert message.endswith(b"\r\n\r\n")
+
+
+def test_reply_headers_are_read_case_insensitively():
+    headers = discovery.parse_ssdp_headers(SSDP_REPLY)
+
+    assert headers["location"] == "http://192.168.10.50:38400/description.xml"
+    assert headers["st"] == "urn:schemas-upnp-org:device:MediaRenderer:1"
+    assert headers["usn"].startswith("uuid:1a2b3c4d")
+    assert headers["ext"] == ""
+
+
+def test_a_datagram_that_is_not_a_reply_yields_nothing_useful():
+    assert "location" not in discovery.parse_ssdp_headers(b"\x00\x01\x02")
+    assert discovery.parse_ssdp_headers(b"") == {}
+
+
+async def test_fetches_and_parses_a_description():
+    server = FakeHTTPServer(DESCRIPTION)
+    await server.start()
+    try:
+        desc = await discovery.async_fetch_description(server.url())
+    finally:
+        await server.stop()
+
+    assert desc is not None
+    assert desc.udn == UDN
+    assert server.requests == ["/description.xml"]
+
+
+async def test_a_chunked_response_is_reassembled():
+    # UPnP servers are HTTP/1.1 and chunked is legal. CyberLinkC sends a
+    # Content-Length, so this is the path no hardware has exercised.
+    server = FakeHTTPServer(DESCRIPTION, chunked=True)
+    await server.start()
+    try:
+        desc = await discovery.async_fetch_description(server.url())
+    finally:
+        await server.stop()
+
+    assert desc is not None
+    assert desc.udn == UDN
+
+
+async def test_a_404_is_not_a_description():
+    server = FakeHTTPServer(DESCRIPTION)
+    await server.start()
+    try:
+        assert await discovery.async_fetch_description(server.url("/nothing.xml")) is None
+    finally:
+        await server.stop()
+
+
+async def test_an_oversized_body_is_dropped_rather_than_read():
+    server = FakeHTTPServer(b"<root>" + b"x" * discovery.MAX_DESCRIPTION_BYTES + b"</root>")
+    await server.start()
+    try:
+        assert await discovery.async_fetch_description(server.url()) is None
+    finally:
+        await server.stop()
+
+
+async def test_an_unreachable_url_is_none_not_an_exception():
+    # A device can answer SSDP and refuse the connection a moment later.
+    assert await discovery.async_fetch_description("http://127.0.0.1:1/x.xml") is None
+    assert await discovery.async_fetch_description("ftp://127.0.0.1/x.xml") is None
+    assert await discovery.async_fetch_description("nonsense") is None
+
+
+async def test_an_open_control_port_is_a_hub_and_nothing_is_sent():
+    received = bytearray()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        received.extend(await reader.read(64))
+        # On 3.12 a handler that returns without closing its writer leaves the
+        # transport attached to the server, and `wait_closed()` below then waits
+        # for a detach that never comes. Fixed upstream in 3.13.
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        assert await discovery.async_probe_control("127.0.0.1", port) is True
+        await asyncio.sleep(0.05)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    # The device on the other end has not been identified. 50006 is a shared
+    # broadcast bus and this probe stays silent on it.
+    assert received == b""
+
+
+async def test_a_closed_control_port_is_not_a_hub():
+    assert await discovery.async_probe_control("127.0.0.1", 1, timeout=1.0) is False
+
+
+async def _discover_against(monkeypatch, device: FakeSSDPDevice, **kwargs):
+    """Point the whole search at a fake on the loopback interface."""
+    monkeypatch.setattr(discovery, "SSDP_ADDRESS", "127.0.0.1")
+    monkeypatch.setattr(discovery, "SSDP_PORT", device.ssdp_port)
+    monkeypatch.setattr(discovery, "SSDP_ATTEMPTS", 1)
+    if device.control_wanted:
+        monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
+    return await discovery.async_discover(timeout=0.5, **kwargs)
+
+
+async def test_discovers_a_hub_end_to_end(monkeypatch):
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        location, control_port = device.location(), device.control_port
+        found = await _discover_against(monkeypatch, device)
+    finally:
+        await device.stop()
+
+    assert len(found) == 1
+    assert found[0].host == "127.0.0.1"
+    assert found[0].udn == UDN
+    assert found[0].name == FRIENDLY_NAME
+    assert found[0].model == "LibreWireless"
+    assert found[0].description_url == location
+    assert found[0].control_port == control_port
+
+
+async def test_a_device_that_answers_three_times_is_found_once(monkeypatch):
+    device = FakeSSDPDevice(DESCRIPTION, replies=3)
+    await device.start()
+    try:
+        found = await _discover_against(monkeypatch, device)
+    finally:
+        await device.stop()
+
+    assert len(found) == 1
+    # And it was asked for its description once, not three times.
+    assert device.description_requests == ["/description.xml"]
+
+
+async def test_another_vendors_renderer_is_not_returned(monkeypatch):
+    device = FakeSSDPDevice(SONOS_DESCRIPTION)
+    await device.start()
+    try:
+        assert await _discover_against(monkeypatch, device) == []
+    finally:
+        await device.stop()
+
+
+async def test_a_librewireless_device_with_no_control_port_is_not_returned(monkeypatch):
+    device = FakeSSDPDevice(DESCRIPTION, control=False)
+    await device.start()
+    try:
+        monkeypatch.setattr(discovery, "CONTROL_PORT", 1)  # nothing listens there
+        found = await _discover_against(monkeypatch, device)
+    finally:
+        await device.stop()
+
+    assert found == []
+
+
+async def test_an_empty_network_is_an_empty_list(monkeypatch):
+    monkeypatch.setattr(discovery, "SSDP_ADDRESS", "127.0.0.1")
+    monkeypatch.setattr(discovery, "SSDP_PORT", 1)
+    monkeypatch.setattr(discovery, "SSDP_ATTEMPTS", 1)
+
+    assert await discovery.async_discover(timeout=0.3) == []
+
+
+async def test_a_typed_address_gets_the_same_identity_as_a_discovered_one(monkeypatch):
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
+        monkeypatch.setattr(discovery, "UPNP_PORT", device.http_port)
+        found = await discovery.async_probe("127.0.0.1")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn == UDN
+    assert found.name == FRIENDLY_NAME
+
+
+async def test_a_reachable_hub_with_no_upnp_still_probes(monkeypatch):
+    # The renderer can be unreachable while the control port answers. The hub is
+    # usable; only its identity is missing, and the caller decides what to do about
+    # that rather than being told there is no device here.
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
+        monkeypatch.setattr(discovery, "UPNP_PORT", 1)
+        found = await discovery.async_probe("127.0.0.1")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.host == "127.0.0.1"
+    assert found.udn is None
+
+
+async def test_an_address_with_nothing_on_it_is_none():
+    assert await discovery.async_probe("127.0.0.1", port=1, timeout=1.0) is None
+
+
+def test_discovery_is_importable_from_the_package():
+    import aiolibresync
+
+    assert aiolibresync.DiscoveredDevice is discovery.DiscoveredDevice
+    assert aiolibresync.async_discover is discovery.async_discover
+    assert aiolibresync.async_probe is discovery.async_probe
+    for name in ("DiscoveredDevice", "async_discover", "async_probe"):
+        assert name in aiolibresync.__all__
