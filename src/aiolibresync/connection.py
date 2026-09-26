@@ -38,15 +38,19 @@ async def cancel_and_wait(task: asyncio.Task[None]) -> None:
     """Cancel `task` and wait for it to end, without swallowing our own cancellation.
 
     The CancelledError that `task` ends with is expected and absorbed. One
-    aimed at the caller, which arrives at the same `await`, is re-raised, so a
-    caller cancelled while tearing down still learns it was cancelled.
+    aimed at the caller during the wait arrives at the same `await`, and is
+    re-raised, so a caller cancelled while tearing down still learns it was
+    cancelled. A cancellation the caller was already handling when it called
+    this does not count: that is the teardown of a cancelled task, and it must
+    run to the end.
     """
+    current = asyncio.current_task()
+    pending = current.cancelling() if current is not None else 0
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
+        if current is not None and current.cancelling() > pending:
             raise
 
 

@@ -392,6 +392,8 @@ async def test_a_cancelled_connect_leaves_nothing_running(hub):
         await task
 
     assert client._poll_task is None
+    assert client._control._task is None
+    assert client._media._task is None  # the port still reconnecting
     await until(lambda: open_sockets(hub) == (0, 0))
 
 

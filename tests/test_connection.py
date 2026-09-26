@@ -270,3 +270,27 @@ async def test_cancel_and_wait_absorbs_the_tasks_cancellation():
     await asyncio.sleep(0)
     await cancel_and_wait(inner)
     assert inner.cancelled()
+
+
+async def test_cancel_and_wait_finishes_the_teardown_of_a_cancelled_caller():
+    """Called while handling its own cancellation, the caller must not stop at
+    the first task it waits for."""
+    stopped: list[bool] = []
+
+    async def caller() -> None:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            for _ in range(2):
+                child = asyncio.create_task(asyncio.sleep(10))
+                await asyncio.sleep(0)
+                await cancel_and_wait(child)
+                stopped.append(child.cancelled())
+            raise
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stopped == [True, True]

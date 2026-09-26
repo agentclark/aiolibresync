@@ -173,9 +173,11 @@ class LibreSyncClient:
             if task is not None:
                 await cancel_and_wait(task)
         finally:
-            await self._control.stop()
-            await self._media.stop()
-            self._apply({"available": False})
+            try:
+                await self._control.stop()
+            finally:
+                await self._media.stop()
+                self._apply({"available": False})
 
     async def _poll_loop(self) -> None:
         """Poll the properties that announce nothing — on both sockets.
