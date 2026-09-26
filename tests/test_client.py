@@ -613,9 +613,9 @@ async def test_transport_commands_move_the_play_state(hub):
     await until(lambda: client.state.play_state is not None)
 
     await client.async_media_play()
-    assert client.state.play_state is PlayState.PLAYING
+    await until(lambda: client.state.play_state is PlayState.PLAYING)
     await client.async_media_pause()
-    assert client.state.play_state is PlayState.PAUSED
+    await until(lambda: client.state.play_state is PlayState.PAUSED)
     await client.async_disconnect()
 
 
@@ -628,8 +628,34 @@ async def test_stop_moves_the_play_state_too(hub):
 
     await client.async_media_stop()
 
-    assert client.state.play_state is PlayState.IDLE
+    await until(lambda: client.state.play_state is PlayState.IDLE)
     assert hub.play_state == 1
+    await client.async_disconnect()
+
+
+async def test_a_stop_that_changes_nothing_is_still_confirmed(hub):
+    """A stopped hub answers a second stop with its acknowledgement and nothing
+    else, so waiting for a play state would time out on a command that worked."""
+    client = make_client(hub, confirm_timeout=0.5)
+    await client.async_connect(timeout=2.0)
+    await client.async_media_stop()
+    await until(lambda: client.state.play_state is PlayState.IDLE)
+    before = len(hub.received["media"])
+
+    await client.async_media_stop()
+
+    assert len(hub.received["media"]) == before + 1
+    assert client.state.play_state is PlayState.IDLE
+    await client.async_disconnect()
+
+
+async def test_a_transport_command_the_hub_never_acknowledges_times_out(hub):
+    hub.ack_transport = False
+    client = make_client(hub, confirm_timeout=0.3)
+    await client.async_connect(timeout=2.0)
+
+    with pytest.raises(ConfirmationTimeout):
+        await client.async_media_pause()
     await client.async_disconnect()
 
 

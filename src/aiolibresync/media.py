@@ -39,6 +39,7 @@ from .const import (
     READ_MODEL_PAYLOAD,
     STATUS_NOT_REGISTERED,
     STATUS_REFUSED,
+    STATUS_REPLY,
     TRANSPORT_PAYLOADS,
     VOLUME_MAX,
     VOLUME_MIN,
@@ -145,6 +146,17 @@ def mid_of(frame: bytes) -> int:
 def is_refused(frame: bytes) -> bool:
     """status 0x02 — the device declined. Boxes 107 and 219 do this."""
     return len(frame) > 5 and frame[5] == STATUS_REFUSED
+
+
+def is_transport_ack(frame: bytes) -> bool:
+    """The device's acknowledgement of a transport command: an empty `0x0028`, status 0x01.
+
+    It arrives for every transport command, including one that changes nothing,
+    such as a stop on a hub that is already stopped, which produces no play
+    state at all. Measured on hardware on 2026-09-26: two stops in a row were
+    both acknowledged, the second within 11 ms and with nothing else.
+    """
+    return len(frame) > 5 and mid_of(frame) == MID_TRANSPORT and frame[5] == STATUS_REPLY
 
 
 def is_not_registered(frame: bytes) -> bool:

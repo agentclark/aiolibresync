@@ -126,6 +126,8 @@ class FakeHub:
         #: The friendlier one is the default so the older tests keep testing
         #: what they were written for; a test that wants the other flips this.
         self.refuse_mute_query = False
+        # Off to model a hub that never acknowledges a transport command.
+        self.ack_transport = True
         #: What box 231 holds: `<serial>,VALID` on the hub measured, fabricated
         #: here. A test for a unit with no valid factory serial sets this.
         self.serial_box = b"FAKE0SERIAL000000000,VALID"
@@ -357,9 +359,13 @@ class FakeHub:
         elif mid == MID_SERIAL:
             self.push_media(device_frame(MID_SERIAL, self.serial_box))
         elif mid == MID_TRANSPORT:
-            self.push_media(device_frame(MID_TRANSPORT))
+            if self.ack_transport:
+                self.push_media(device_frame(MID_TRANSPORT))
+            # Like the hub: a command that changes nothing announces nothing.
+            previous = self.play_state
             self.play_state = {b"PLAY": 0, b"PAUSE": 2, b"STOP": 1}.get(payload, self.play_state)
-            self.push_media(device_frame(MID_PLAY_STATE, str(self.play_state).encode()))
+            if self.play_state != previous:
+                self.push_media(device_frame(MID_PLAY_STATE, str(self.play_state).encode()))
 
 
 class FakeHTTPServer:

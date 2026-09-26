@@ -35,6 +35,9 @@ from .state import DeviceState
 _LOGGER = logging.getLogger(__name__)
 
 _UNKNOWN_FRAME_LIMIT = 20
+#: The key a transport acknowledgement puts in the patch confirmation waiters
+#: see. It never reaches the state: an acknowledgement is an event, not a value.
+_TRANSPORT_ACK = "transport_ack"
 _NO_URL = "<none>"
 
 
@@ -300,6 +303,9 @@ class LibreSyncClient:
             self._counters["media_not_registered"] += 1
             self._recover_media_session()
             return
+        if media.is_transport_ack(frame):
+            self._notify_waiters({_TRANSPORT_ACK: True}, self._state)
+            return
         patch = media.decode(frame)
         if patch is None:
             self._record_unknown("media", frame, f"{media.mid_of(frame):04x}")
@@ -532,31 +538,39 @@ class LibreSyncClient:
     async def async_media_play(self) -> None:
         """Play.
 
+        Confirmed by the device's acknowledgement of the command, not by a play
+        state: a command that changes nothing produces no play state at all.
+
         Raises `NotConnectedError` if port 7777 is down, `ConfirmationTimeout`
-        if the device does not report a play state in time.
+        if the device does not acknowledge the command in time.
         """
-        await self._async_expect(
-            lambda patch, _state: "play_state" in patch, send=self._media.send(media.play())
-        )
+        await self._async_transport(media.play())
 
     async def async_media_pause(self) -> None:
         """Pause.
 
+        Confirmed by the device's acknowledgement of the command, not by a play
+        state: a command that changes nothing produces no play state at all.
+
         Raises `NotConnectedError` if port 7777 is down, `ConfirmationTimeout`
-        if the device does not report a play state in time.
+        if the device does not acknowledge the command in time.
         """
-        await self._async_expect(
-            lambda patch, _state: "play_state" in patch, send=self._media.send(media.pause())
-        )
+        await self._async_transport(media.pause())
 
     async def async_media_stop(self) -> None:
         """Stop.
 
+        Confirmed by the device's acknowledgement of the command, not by a play
+        state: a command that changes nothing produces no play state at all.
+
         Raises `NotConnectedError` if port 7777 is down, `ConfirmationTimeout`
-        if the device does not report a play state in time.
+        if the device does not acknowledge the command in time.
         """
+        await self._async_transport(media.stop())
+
+    async def _async_transport(self, frame: bytes) -> None:
         await self._async_expect(
-            lambda patch, _state: "play_state" in patch, send=self._media.send(media.stop())
+            lambda patch, _state: _TRANSPORT_ACK in patch, send=self._media.send(frame)
         )
 
     async def async_media_next_track(self) -> None:

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 — 2026-09-26
+
+- `async_media_play()`, `async_media_pause()` and `async_media_stop()` are confirmed by the device's acknowledgement of the command, an empty `0x0028` reply, instead of by a play state. A command that changes nothing, such as a stop on a hub that is already stopped, produces no play state, so it used to raise `ConfirmationTimeout` after the full timeout although it had been accepted. Measured on a Platin Stereo Hub: the acknowledgement arrives within about 10 ms, also when nothing changes.
+- `media.is_transport_ack()` recognises that acknowledgement.
+
 ## 0.5.0 — 2026-09-26
 
 - `async_connect(timeout=...)` waits until both ports are open and raises `NotConnectedError` if they are not in time. On that error, and on cancellation, it disconnects again first, so a failed attempt leaves no reconnect loop or poll running. Without `timeout` it behaves as before.

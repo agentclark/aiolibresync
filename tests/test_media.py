@@ -207,3 +207,9 @@ def test_box_231_decodes_to_the_serial_or_to_none_but_never_to_unknown():
 
 def test_the_serial_query_is_a_query_and_nothing_else():
     assert media.QUERY_SERIAL == bytes.fromhex("000001e7000000000000")
+
+
+def test_a_transport_acknowledgement_is_recognised():
+    assert media.is_transport_ack(device_frame(0x0028, b"", status=0x01))
+    assert not media.is_transport_ack(device_frame(0x0028, b"", status=0x02))
+    assert not media.is_transport_ack(device_frame(0x0033, b"1", status=0x01))

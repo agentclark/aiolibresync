@@ -134,7 +134,7 @@ Commands use `msg_type 0x02`. The client writes MIDs little-endian; the column s
 | `0x00d0` | `READ_Model`, ASCII | read model; answered `Model:Stereo Hub` | capture |
 | `0x003f` | `MUTE` / `UNMUTE` | **accepted and ineffective**; do not use, see [Writing a box is not commanding the device](#writing-a-box-is-not-commanding-the-device) | tested |
 
-Transport commands are acknowledged with an empty `0x0028` frame, `status 0x01`, followed by the resulting events. `PAUSE` produces `0x33 "2"`, `PLAY` produces `0x33 "0"`, and a volume set produces the `0x40` event twice, just as the same actions from the RF remote do. The transport payloads are the vendor's own strings, and the device behaves the same whichever side triggers an action.
+Transport commands are acknowledged with an empty `0x0028` frame, `status 0x01`, followed by the resulting events. `PAUSE` produces `0x33 "2"`, `PLAY` produces `0x33 "0"`, and a volume set produces the `0x40` event twice, just as the same actions from the RF remote do. The transport payloads are the vendor's own strings, and the device behaves the same whichever side triggers an action. A command that changes nothing is acknowledged all the same and followed by nothing: a `STOP` sent to a hub that is already stopped gets the `0x0028` reply within about 10 ms and no other frame (`tested`, 2026-09-26). The acknowledgement, not a play state, is therefore what confirms a transport command.
 
 Mute cannot be set from either port. Its state is read here with a `0x003f` query, or from `02 21` on port 50006; see [protocol-system-control.md](protocol-system-control.md).
 
