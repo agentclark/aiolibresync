@@ -83,6 +83,10 @@ class DeviceState:
     manual_eq: bool | None = None
     eq_preset: int | None = None  # 1..3, or 0 while the vendor app's EQ editor is open
     model: str | None = None
+    #: The factory serial, from message box 231. The preferred stable
+    #: identifier: it does not depend on the UPnP daemon, unlike the UDN. None
+    #: until read, and on a unit with no valid factory serial.
+    serial: str | None = None
 
     @property
     def playback(self) -> PlayState | None:

@@ -26,12 +26,16 @@ from typing import Any
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
+from . import frames, media
 from .const import (
     CONTROL_PORT,
     DESCRIPTION_PATH,
     DISCOVERY_TIMEOUT,
     HTTP_TIMEOUT,
     MAX_DESCRIPTION_BYTES,
+    MEDIA_PORT,
+    MID_REGISTER,
+    MID_SERIAL,
     PROBE_TIMEOUT,
     SSDP_ADDRESS,
     SSDP_ATTEMPTS,
@@ -282,6 +286,61 @@ async def async_probe_control(
     with contextlib.suppress(OSError, TimeoutError):
         await writer.wait_closed()
     return True
+
+
+async def async_read_serial(
+    host: str,
+    port: int = MEDIA_PORT,
+    *,
+    # Returns None rather than raising, like async_probe_control.
+    timeout: float = PROBE_TIMEOUT,  # noqa: ASYNC109
+) -> str | None:
+    """The hub's factory serial, read from message box 231, or None.
+
+    Unlike `async_probe_control` this does write: a session registration and one
+    query, both read-only in effect. Call it for a host that is already believed
+    to be a hub — one the user typed, or one whose description and control port
+    both checked out — and not for a stranger.
+
+    None covers every way of not knowing: nothing listening, no answer in time,
+    or a unit whose factory serial is missing or not marked valid, which the
+    firmware itself allows for. The caller falls back to the UDN.
+    """
+    try:
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_connection(host, port)
+    except (OSError, TimeoutError):
+        return None
+    try:
+        async with asyncio.timeout(timeout):
+            local = writer.get_extra_info("sockname")
+            if not local:
+                return None
+            writer.write(media.register(local[0]))
+            await writer.drain()
+            framer = frames.MediaFrameReader()
+            asked = False
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return None
+                for frame in framer.feed(chunk):
+                    mid = media.mid_of(frame)
+                    if mid == MID_REGISTER and not asked:
+                        # The query is only answered on a registered session.
+                        writer.write(media.QUERY_SERIAL)
+                        await writer.drain()
+                        asked = True
+                    elif mid == MID_SERIAL:
+                        patch = media.decode(frame)
+                        serial = patch.get("serial") if patch else None
+                        return serial if isinstance(serial, str) else None
+    except (OSError, TimeoutError):
+        return None
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError, TimeoutError):
+            await writer.wait_closed()
 
 
 @dataclass(frozen=True, slots=True)

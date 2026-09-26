@@ -431,9 +431,9 @@ class LibreSyncClient:
     def diagnostics(self) -> dict[str, Any]:
         """Everything needed to debug a stranger's hub, with the address removed.
 
-        The host and the metadata the user is listening to are redacted; the
-        rest of the state stays, because volume, power, source names and DSP
-        flags are device facts and are the whole point of the dump.
+        The host, the serial and the metadata the user is listening to are
+        redacted; the rest of the state stays, because volume, power, source
+        names and DSP flags are device facts and are the whole point of the dump.
 
         `unknown_frames` carries raw device bytes. They are unclassified by
         definition, so they may contain anything the firmware chose to send.
@@ -463,6 +463,9 @@ class LibreSyncClient:
         track = state.get("now_playing")
         if isinstance(track, dict):
             state["now_playing"] = _redact_now_playing(track)
+        if state.get("serial") is not None:
+            # An identifier of one physical unit, like the host.
+            state["serial"] = "<redacted>"
         return state
 
     # --- commands ------------------------------------------------------------

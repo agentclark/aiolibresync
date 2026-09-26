@@ -10,9 +10,10 @@ import asyncio
 import contextlib
 from pathlib import Path
 
-from fakes import FakeHTTPServer, FakeSSDPDevice
+from fakes import FakeHTTPServer, FakeHub, FakeSSDPDevice
 
 from aiolibresync import discovery
+from aiolibresync.frames import media_command
 
 CAPTURES = Path(__file__).parent / "fixtures"
 DESCRIPTION = (CAPTURES / "upnp-device-description.xml").read_bytes()
@@ -324,3 +325,44 @@ def test_discovery_is_importable_from_the_package():
     assert aiolibresync.async_probe is discovery.async_probe
     for name in ("DiscoveredDevice", "async_discover", "async_probe"):
         assert name in aiolibresync.__all__
+
+
+async def test_the_serial_is_read_from_a_registered_session():
+    hub = FakeHub()
+    await hub.start()
+    try:
+        serial = await discovery.async_read_serial("127.0.0.1", hub.media_port)
+    finally:
+        await hub.stop()
+    assert serial == "FAKE0SERIAL000000000"
+    # Registered first, then one query, and nothing else was written.
+    assert [media_command(f, from_device=False) for f in hub.received["media"]] == [0x0003, 0x00E7]
+
+
+async def test_a_serial_not_marked_valid_is_none():
+    hub = FakeHub()
+    hub.serial_box = b",INVALID"
+    await hub.start()
+    try:
+        assert await discovery.async_read_serial("127.0.0.1", hub.media_port) is None
+    finally:
+        await hub.stop()
+
+
+async def test_nothing_listening_is_none_not_an_exception():
+    assert await discovery.async_read_serial("127.0.0.1", 1, timeout=0.5) is None
+
+
+async def test_a_peer_that_never_registers_us_is_none_within_the_timeout():
+    async def silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(64)
+        await asyncio.sleep(1)
+        writer.close()
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        assert await discovery.async_read_serial("127.0.0.1", port, timeout=0.2) is None
+    finally:
+        server.close()
+        await server.wait_closed()

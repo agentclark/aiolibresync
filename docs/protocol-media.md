@@ -136,7 +136,7 @@ Commands use `msg_type 0x02`. The client writes MIDs little-endian; the column s
 
 Transport commands are acknowledged with an empty `0x0028` frame, `status 0x01`, followed by the resulting events. `PAUSE` produces `0x33 "2"`, `PLAY` produces `0x33 "0"`, and a volume set produces the `0x40` event twice, just as the same actions from the RF remote do. The transport payloads are the vendor's own strings, and the device behaves the same whichever side triggers an action.
 
-Mute is controlled on port 50006, not here.
+Mute cannot be set from either port. Its state is read here with a `0x003f` query, or from `02 21` on port 50006; see [protocol-system-control.md](protocol-system-control.md).
 
 ## Pushed events
 
@@ -213,6 +213,8 @@ Queries use `msg_type 0x01` and an empty payload. Replies carry `status 0x01` an
 | `0x0033` | e.g. `"0"` | play state; returns `1` after a `STOP` | tested |
 | `0x003f` | `MUTE` / `UNMUTE` | mute state | tested |
 | `0x0040` | e.g. `"43"` | volume | tested |
+| `0x0005` | e.g. `"15262"` | firmware incremental build number | tested |
+| `0x00e7` | `<serial>,VALID`, 26 bytes on the hub measured | the factory serial; see [devices.md](devices.md#identity) | tested |
 | `0x0032` | e.g. `"25"` | unknown; the value matches the internal source id pushed on `0x32` | capture |
 | `0x006b` | empty, `status 0x02` | refused on this model | capture |
 | `0x00db` | empty, `status 0x02` | refused on this model | capture |
@@ -322,6 +324,7 @@ Two independent dispatch tables in the same daemon cover MIDs 6..254 and agree w
 | `0x70` (112) | tunnel data: **this is port 50006** | binary + tested |
 | `0xd0` (208) | model read (`READ_Model` → `Model:Stereo Hub`) | capture |
 | `0xe6` (230) | sample rate | capture |
+| `0xe7` (231) | factory serial, written at boot from the factory partition with a validity flag, `<serial>,VALID` | binary + tested |
 | `0x1ee` (494) | emitted on track change, empty payload | capture |
 
 Because box 111 carries it, the port 50006 listens on is configuration rather than a compile-time constant.

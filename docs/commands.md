@@ -215,6 +215,8 @@ The full layout is in [protocol-media.md](protocol-media.md).
 | Get now-playing | `01` | `002a` | *(empty)* | capture |
 | Get volume | `01` | `0040` | *(empty)* | tested |
 | Get mute | `01` | `003f` | *(empty)*, answered `MUTE` / `UNMUTE` or refused | tested |
+| Get firmware build | `01` | `0005` | *(empty)*, answered e.g. `15262` | tested |
+| Get serial | `01` | `00e7` | *(empty)*, answered `<serial>,VALID`. Query only: never write this box | tested |
 | ~~Set mute~~ | `02` | `003f` | `MUTE` / `UNMUTE`, **accepted and ineffective** | tested |
 
 **Register the session before anything else.** An unregistered connection is answered `cmd 0000 status 03` and the request is dropped, which looks like a malformed frame and is not. The vendor's app waits about 100 ms after registering before it sends anything.

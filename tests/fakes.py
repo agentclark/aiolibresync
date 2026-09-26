@@ -23,6 +23,7 @@ from aiolibresync.const import (
     MID_PLAY_STATE,
     MID_PLAYVIEW,
     MID_REGISTER,
+    MID_SERIAL,
     MID_TRANSPORT,
     MID_VOLUME,
     MSG_COMMAND,
@@ -125,6 +126,9 @@ class FakeHub:
         #: The friendlier one is the default so the older tests keep testing
         #: what they were written for; a test that wants the other flips this.
         self.refuse_mute_query = False
+        #: What box 231 holds: `<serial>,VALID` on the hub measured, fabricated
+        #: here. A test for a unit with no valid factory serial sets this.
+        self.serial_box = b"FAKE0SERIAL000000000,VALID"
         self.registered = False
         self.received: dict[str, list[bytes]] = {"control": [], "media": []}
         #: Everything the hub put on the wire, per port. The mirror of
@@ -350,6 +354,8 @@ class FakeHub:
             self.push_media(device_frame(MID_PLAYVIEW, json.dumps(self.playview()).encode()))
         elif mid == MID_MODEL:
             self.push_media(device_frame(MID_MODEL, b"Model:Stereo Hub"))
+        elif mid == MID_SERIAL:
+            self.push_media(device_frame(MID_SERIAL, self.serial_box))
         elif mid == MID_TRANSPORT:
             self.push_media(device_frame(MID_TRANSPORT))
             self.play_state = {b"PLAY": 0, b"PAUSE": 2, b"STOP": 1}.get(payload, self.play_state)

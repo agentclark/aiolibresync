@@ -30,6 +30,7 @@ from .const import (
     MID_PLAYVIEW_DUPLICATE,
     MID_POSITION,
     MID_REGISTER,
+    MID_SERIAL,
     MID_SPEAKER,
     MID_TRANSPORT,
     MID_VOLUME,
@@ -79,9 +80,18 @@ QUERY_PLAYVIEW = build_query(MID_PLAYVIEW)
 #: nothing but the value that reads back.
 QUERY_MUTE = build_query(MID_MUTE)
 READ_MODEL = _build(MSG_COMMAND, MID_MODEL, READ_MODEL_PAYLOAD)
+#: The factory serial. Read-only, and there is deliberately no way to write it.
+QUERY_SERIAL = build_query(MID_SERIAL)
 
 #: What to ask once the session is registered.
-CONNECT_QUERIES = (QUERY_PLAYVIEW, QUERY_VOLUME, QUERY_PLAY_STATE, QUERY_MUTE, READ_MODEL)
+CONNECT_QUERIES = (
+    QUERY_PLAYVIEW,
+    QUERY_VOLUME,
+    QUERY_PLAY_STATE,
+    QUERY_MUTE,
+    READ_MODEL,
+    QUERY_SERIAL,
+)
 
 
 def register(ip: str) -> bytes:
@@ -187,6 +197,11 @@ def decode(frame: bytes) -> dict[str, Any] | None:
 
     if is_refused(frame) or is_not_registered(frame):
         return {}
+    if mid == MID_SERIAL:
+        # A unit with no valid factory serial is expected to exist: the
+        # firmware stores a validity flag next to it. No serial is a state,
+        # not an unclassified frame.
+        return {"serial": parse_serial(payload)}
     if not payload:
         return {} if mid in KNOWN_UNDECODED_MIDS else None
 
@@ -230,6 +245,16 @@ def decode(frame: bytes) -> dict[str, Any] | None:
     if mid in KNOWN_UNDECODED_MIDS:
         return {}
     return None
+
+
+def parse_serial(payload: bytes) -> str | None:
+    """`<serial>,VALID` -> the serial. Anything else, including an empty box, -> None."""
+    text = payload.decode("ascii", "replace").strip("\x00").strip()
+    serial, _, flag = text.partition(",")
+    serial = serial.strip()
+    if flag.strip() != "VALID" or not serial or not serial.isascii() or not serial.isalnum():
+        return None
+    return serial
 
 
 def _as_int(text: str) -> int | None:

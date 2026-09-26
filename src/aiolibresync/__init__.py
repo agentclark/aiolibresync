@@ -56,7 +56,7 @@ Use the named operations in `aiolibresync.media` instead.
 
 from .client import LibreSyncClient
 from .const import CONTROL_PORT, MEDIA_PORT, POLL_INTERVAL
-from .discovery import DiscoveredDevice, async_discover, async_probe
+from .discovery import DiscoveredDevice, async_discover, async_probe, async_read_serial
 from .exceptions import (
     ConfirmationTimeout,
     LibreSyncError,
@@ -83,4 +83,5 @@ __all__ = [
     "UnsafeCommandError",
     "async_discover",
     "async_probe",
+    "async_read_serial",
 ]

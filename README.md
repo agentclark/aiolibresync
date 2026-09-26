@@ -32,7 +32,9 @@ for device in await async_discover():
 device = await async_probe("192.168.1.50")  # an address you already have
 ```
 
-`async_discover()` sends an SSDP search, fetches the device description from whatever answers, and confirms that the control port is open. The probe sends nothing to the control port: it only opens a TCP connection. `udn` is the stable identifier and survives reboots and address changes. It can be `None` on a hub that is fully controllable, because it is served by a UPnP daemon that occasionally stops on its own. A mains power cycle brings it back. See [docs/devices.md](docs/devices.md).
+`async_discover()` sends an SSDP search, fetches the device description from whatever answers, and confirms that the control port is open. The probe sends nothing to the control port: it only opens a TCP connection.
+
+Two stable identifiers are available. The **factory serial** (`await async_read_serial(host)`, or `state.serial` on a connected client) does not depend on the UPnP daemon and is the one to prefer. The **UDN** (`device.udn`) is what discovery sees. Either can be `None`: a unit may lack a valid factory serial, and the UDN is served by a UPnP daemon that occasionally stops on its own until the hub is power-cycled. See [docs/devices.md](docs/devices.md#identity).
 
 ## Controlling it
 

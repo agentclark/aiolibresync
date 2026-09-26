@@ -96,6 +96,9 @@ MID_SPEAKER: Final = 0x0046
 MID_TUNNEL: Final = 0x0070
 MID_MODEL: Final = 0x00D0
 MID_SAMPLE_RATE: Final = 0x00E6
+#: The factory serial, `<serial>,VALID`. luci_service writes it here at boot
+#: from the factory partition, so it does not depend on the UPnP daemon.
+MID_SERIAL: Final = 0x00E7
 MID_TRACK_CHANGE: Final = 0x01EE
 
 #: The closed set of message boxes this library may address. `command` on port
@@ -105,6 +108,7 @@ MID_TRACK_CHANGE: Final = 0x01EE
 #:
 #: MID_MUTE is here for the *query* only. Writing it is accepted by the device
 #: and does nothing — tested 2026-08-15 — so media.py exposes no setter for it.
+#: MID_SERIAL is query-only too: it was read on 2026-09-26 and never written.
 ALLOWED_MIDS: Final = frozenset(
     {
         MID_REGISTER,
@@ -114,6 +118,7 @@ ALLOWED_MIDS: Final = frozenset(
         MID_MUTE,
         MID_VOLUME,
         MID_MODEL,
+        MID_SERIAL,
     }
 )
 

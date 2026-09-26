@@ -83,12 +83,17 @@ Details that matter to a client:
 | SSDP reply | `SERVER` | `Platform 1.0 CyberLinkC/3.0 UPnP/1.0 DLNADOC/1.50` |
 | SSDP reply | `USN` | carries the UDN |
 | Port 7777 | `READ_Model` | `Model:Stereo Hub` |
+| Port 7777 | box `0x00e7` query | `<serial>,VALID`: the factory serial, 20 characters |
 
-### The UDN is the stable identifier
+### Two stable identifiers, in order of preference
 
-The UPnP UDN is the identifier to key a device on. It survives reboots, mains power cycles, a change of subnet and months of operation, and it is what SSDP carries in its `USN`. A factory reset mints a new one, so a client keyed on it sees a reset hub as a new device.
+**The factory serial, from message box 231.** At boot the LUCI service reads the unit's serial from the factory partition, checks it, and stores it in box `0x00e7` as `<serial>,VALID`. A registered port-7777 session reads it with a plain query (`01 00e7`, empty payload). It does not depend on the UPnP daemon, so it is readable whenever the control ports are, and it comes from the factory partition rather than from anything a reset regenerates. Believe it only when the flag says `VALID`: the firmware keeps that flag because a unit without a valid serial is possible. The mechanism is in Libre's generic LUCI service rather than in anything brand-specific, but it has only been confirmed on one Platin unit.
 
-Do not use `serialNumber`: it is the placeholder `1234567890` on this hardware, and a field that looks like an identifier but is not is worse than no field. `friendlyName` and `modelName` are generic.
+**The UPnP UDN.** It survives reboots, mains power cycles, a change of subnet and months of operation, and it is what SSDP carries in its `USN`, so discovery sees it without any connection. A factory reset mints a new one. It is served by `LibreDmr`, and it is unreadable whenever that daemon is down (below).
+
+A client that has to recognise the same hub across paths should record both when it can. Discovery only ever sees the UDN, and a unit may lack a valid serial. The library exposes the serial as `DeviceState.serial` and `async_read_serial(host)`, and the UDN as `DiscoveredDevice.udn`.
+
+Do not use the description's `serialNumber`: it is the placeholder `1234567890` on this hardware, unrelated to the factory serial. `friendlyName` and `modelName` are generic. The Wi-Fi MAC is not readable by a client: the firmware only uses it internally.
 
 ### When the UDN is unavailable
 

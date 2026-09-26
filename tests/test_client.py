@@ -979,7 +979,7 @@ async def test_refresh_re_reads_every_property_on_demand(hub):
     await client.async_refresh()
 
     # `send` returns once the frame is drained, not once the hub has read it.
-    await until(lambda: len(hub.received["control"]) == 6 and len(hub.received["media"]) == 5)
+    await until(lambda: len(hub.received["control"]) == 6 and len(hub.received["media"]) == 6)
     assert {bytes(f[3:5]) for f in hub.received["control"]} == {
         bytes.fromhex("0201"),
         bytes.fromhex("020d"),
@@ -994,6 +994,7 @@ async def test_refresh_re_reads_every_property_on_demand(hub):
         0x0033,
         0x003F,
         0x00D0,
+        0x00E7,  # the factory serial
     }
     await client.async_disconnect()
 
@@ -1124,3 +1125,28 @@ async def test_the_package_docstring_example_actually_runs(hub):
     namespace: dict = {}
     exec(compile(source, "<aiolibresync docstring>", "exec"), namespace)
     await namespace["main"]()
+
+
+async def test_the_serial_is_read_on_connect_and_redacted_in_diagnostics(hub):
+    """The identifier a config entry prefers, and one that must not leak in a bug report."""
+    client = make_client(hub)
+    await client.async_connect()
+    await until(lambda: client.state.serial is not None)
+    assert client.state.serial == "FAKE0SERIAL000000000"
+    assert client.diagnostics()["state"]["serial"] == "<redacted>"
+    await client.async_disconnect()
+
+
+async def test_a_unit_without_a_valid_serial_has_none_and_nothing_unknown(hub):
+    hub.serial_box = b"FAKE0SERIAL000000000,INVALID"
+    client = make_client(hub)
+    await client.async_connect()
+    await until(lambda: client.state.model is not None)
+    await until(
+        lambda: any(media_command(f, from_device=False) == 0x00E7 for f in hub.received["media"])
+    )
+    await asyncio.sleep(0.05)
+    assert client.state.serial is None
+    assert client.diagnostics()["state"]["serial"] is None
+    assert client.diagnostics()["unknown_frames"]["media"] == []
+    await client.async_disconnect()

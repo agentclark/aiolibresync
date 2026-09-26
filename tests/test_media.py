@@ -4,9 +4,10 @@ import json
 
 import pytest
 from conftest import tap_log_frames
+from fakes import device_frame
 
 from aiolibresync import media
-from aiolibresync.const import MSG_COMMAND
+from aiolibresync.const import MID_SERIAL, MSG_COMMAND
 from aiolibresync.exceptions import UnsafeCommandError
 from aiolibresync.state import PlayState
 
@@ -191,3 +192,32 @@ def _device(mid: int, payload: bytes, status: int = 0x01) -> bytes:
         + payload
     )
     return frame[:6] + media_crc(frame).to_bytes(2, "big") + frame[8:]
+
+
+@pytest.mark.parametrize(
+    ("payload", "serial"),
+    [
+        # The shape measured on the hub: 20 characters, then the validity flag.
+        (b"AbCdEf0123456789XyZw,VALID", "AbCdEf0123456789XyZw"),
+        (b"AbCdEf0123456789XyZw,VALID\x00", "AbCdEf0123456789XyZw"),
+        # The firmware keeps a validity flag, so a unit without one is expected.
+        (b"AbCdEf0123456789XyZw,INVALID", None),
+        (b",VALID", None),
+        (b"", None),
+        (b"AbCdEf0123456789XyZw", None),
+        (b"Ab/Cd,VALID", None),
+    ],
+)
+def test_the_serial_is_believed_only_when_the_firmware_marks_it_valid(payload, serial):
+    assert media.parse_serial(payload) == serial
+
+
+def test_box_231_decodes_to_the_serial_or_to_none_but_never_to_unknown():
+    """No serial is a state of the unit, not a frame nobody has classified."""
+    valid = device_frame(MID_SERIAL, b"AbCdEf0123456789XyZw,VALID")
+    assert media.decode(valid) == {"serial": "AbCdEf0123456789XyZw"}
+    assert media.decode(device_frame(MID_SERIAL)) == {"serial": None}
+
+
+def test_the_serial_query_is_a_query_and_nothing_else():
+    assert media.QUERY_SERIAL == bytes.fromhex("000001e7000000000000")
