@@ -62,7 +62,7 @@ The description filter accepts a `manufacturer` containing `LibreWireless` **or*
 
 Details that matter to a client:
 
-- **`LOCATION` is the only URL to trust.** The description's `URLBase` is written at boot and can carry an address the hub no longer has.
+- **`LOCATION` is the only URL to trust.** The description's `URLBase` is written at boot and can carry an address the hub no longer has. The library follows a `LOCATION` only when it names the address the reply came from, which is what the hub sends (`http://<its IP>:38400/description.xml`, captured); a reply pointing at a hostname or at another machine is ignored.
 - **The confirmation probe sends nothing.** It connects to 50006 and closes. At that point the host has only served a description of itself, and 50006 is a shared bus that every connected client hears.
 - **Manual setup has no `LOCATION` header**, so a client that knows the address assumes `http://<host>:38400/description.xml`. Port 50006 answering is what makes an address usable; a missing description only means the identity is unknown.
 - Each SSDP reply carries a `BOOTID.UPNP.ORG` header that changes on every reboot. It is present in the reply and not in the description.
