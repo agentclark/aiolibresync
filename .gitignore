@@ -1,7 +1,23 @@
+# Environments
 .venv/
+venv/
+
+# Python bytecode and packaging
 __pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Tool caches and coverage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-dist/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editors and OS
+.idea/
+.vscode/
 .DS_Store
