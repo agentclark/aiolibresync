@@ -8,9 +8,10 @@ other clients are also driving.
 """
 
 import asyncio
+import contextlib
 import logging
 from collections import Counter, deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Any
 
@@ -95,17 +96,13 @@ class LibreSyncClient:
         self._counters = {
             "control_frames": 0,
             "media_frames": 0,
-            "control_unknown": 0,
-            "media_unknown": 0,
             # A hub refusing everything otherwise produces a dump byte-for-byte
             # identical to a healthy idle one: both statuses decode to an empty
             # patch and die on _apply's early return.
             "media_refused": 0,
             "media_not_registered": 0,
         }
-        self._media_recovering = False
         self._last_media_recovery: float | None = None
-        self._recovery_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._control = Connection(
             host,
@@ -130,36 +127,53 @@ class LibreSyncClient:
 
     # --- lifecycle ----------------------------------------------------------
 
-    async def async_connect(self) -> None:
+    async def async_connect(
+        self,
+        *,
+        # A readiness wait with its own cleanup, not a deadline the caller could
+        # impose with `asyncio.timeout`: on expiry the client disconnects too.
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> None:
         """Open both sockets and start the poll loop.
 
-        They keep themselves open from here on. Calling this twice is a caller
-        move rather than a theoretical one — Home Assistant retries
-        `async_setup_entry` and this never raises — so the poll loop is guarded
-        exactly as `Connection.start` is: a second `create_task` would overwrite
-        the only reference `async_disconnect` cancels, and the orphan would go
-        on polling a device the integration has already thrown away.
+        They keep themselves open from here on. Without `timeout` this returns
+        once the sockets are *scheduled*, and never raises. With it, it also
+        waits until both ports are open, and raises `NotConnectedError` if they
+        are not within `timeout` seconds. On that error, and on cancellation,
+        the client is disconnected again before the exception propagates, so a
+        failed attempt leaves nothing running.
+
+        Calling this twice is a caller move rather than a theoretical one —
+        Home Assistant retries `async_setup_entry` — so the poll loop is
+        guarded exactly as `Connection.start` is: a second `create_task` would
+        overwrite the only reference `async_disconnect` cancels, and the orphan
+        would go on polling a device the integration has already thrown away.
         """
         await self._control.start()
         await self._media.start()
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop(), name="aiolibresync-poll")
+        if timeout is None or self._state.available:
+            return
+        try:
+            await self._async_expect(lambda _patch, state: state.available, timeout=timeout)
+        except ConfirmationTimeout as err:
+            await self.async_disconnect()
+            raise NotConnectedError(
+                f"{self.host} did not answer on both ports within {timeout} s"
+            ) from err
+        except asyncio.CancelledError:
+            await self.async_disconnect()
+            raise
 
     async def async_disconnect(self) -> None:
-        # Cancel the poll loop and the re-registration first: a task left
-        # running would outlive unload and go on driving — or reconnecting — a
-        # client the integration has already discarded.
-        tasks = (self._poll_task, self._recovery_task)
-        self._poll_task = self._recovery_task = None
-        for task in tasks:
-            if task is None:
-                continue
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._media_recovering = False
+        # Cancel the poll loop first: left running, it would outlive unload and
+        # go on driving a client the integration has already discarded.
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._poll_task
+            self._poll_task = None
         await self._control.stop()
         await self._media.stop()
         self._apply({"available": False})
@@ -216,17 +230,12 @@ class LibreSyncClient:
         cycle in which it is about to fail: a shared try would let a 50006 that
         went down stop 7777 from ever discovering that it had gone down too —
         which is the same silence this poll exists to break, one port along.
-
-        `send` catches every OSError internally and re-raises
-        NotConnectedError, so a bare OSError is not expected here any more and
-        that clause is belt-and-braces.
         """
         if not conn.connected:
             return
         try:
-            for query in queries:
-                await conn.send(query)
-        except (NotConnectedError, OSError) as err:
+            await conn.send(*queries)
+        except NotConnectedError as err:
             _LOGGER.debug("poll on port %s failed: %s", conn.port, err)
 
     async def async_refresh(self) -> None:
@@ -234,14 +243,11 @@ class LibreSyncClient:
 
         Not the poll loop, and free to raise: a caller asked for this one.
         """
-        for query in systemcontrol.CONNECT_QUERIES:
-            await self._control.send(query)
-        for query in media.CONNECT_QUERIES:
-            await self._media.send(query)
+        await self._control.send(*systemcontrol.CONNECT_QUERIES)
+        await self._media.send(*media.CONNECT_QUERIES)
 
     async def _on_control_connect(self, conn: Connection) -> None:
-        for query in systemcontrol.CONNECT_QUERIES:
-            await conn.send(query)
+        await conn.send(*systemcontrol.CONNECT_QUERIES)
 
     async def _on_media_connect(self, conn: Connection) -> None:
         ip = conn.local_ip
@@ -255,8 +261,7 @@ class LibreSyncClient:
             return
         await conn.send(media.register(ip))
         await asyncio.sleep(REGISTER_SETTLE)  # the app waits ~100 ms too
-        for query in media.CONNECT_QUERIES:
-            await conn.send(query)
+        await conn.send(*media.CONNECT_QUERIES)
 
     # --- state --------------------------------------------------------------
 
@@ -308,15 +313,15 @@ class LibreSyncClient:
         entries read the same whether they stand for twenty frames or twenty
         thousand.
         """
-        self._unknown[port].append(frame.hex(" "))
+        shown = frame.hex(" ")
+        self._unknown[port].append(shown)
         self._unknown_signatures[port][signature] += 1
-        self._counters[f"{port}_unknown"] += 1
-        _LOGGER.debug("unknown %s frame: %s", port, frame.hex(" "))
+        _LOGGER.debug("unknown %s frame: %s", port, shown)
 
     # --- the 7777 session ----------------------------------------------------
 
     def _recover_media_session(self) -> None:
-        """Arm a re-registration after `status 0x03`, at most one per cooldown.
+        """Re-register after `status 0x03`, at most once per cooldown.
 
         Nothing else can recover this in time. A confirmation waiter only
         exists while a command is in flight, so a refusal during the connect
@@ -325,15 +330,18 @@ class LibreSyncClient:
         path — but not for up to POLL_INTERVAL, and every push and command
         inside that window is lost.
 
-        Edge-triggered and rate-limited on purpose. The connect burst is five
-        queries, so a session the device has forgotten refuses five times in a
-        row, and without the flag that would be five recoveries. The cooldown
-        then bounds the rest: `Connection._run` counts a socket that received
-        anything as proved and retries at RECONNECT_BASE, so the connection's
-        own backoff cannot throttle a forced drop — this is what does.
+        Rate-limited on purpose. The connect burst is several queries, so a
+        session the device has forgotten refuses several times in a row, and
+        the cooldown turns that into one recovery. It also bounds the rest:
+        `Connection._run` counts a socket that received anything as proved and
+        retries at RECONNECT_BASE, so the connection's own backoff cannot
+        throttle a forced drop — this is what does.
+
+        The socket is dropped rather than the register frame re-sent in place.
+        `_on_media_connect` is the only sequence known to produce a working
+        session, and by the time a refusal arrives everything read over that
+        socket is stale anyway — so the connect queries want re-reading too.
         """
-        if self._media_recovering:
-            return
         now = asyncio.get_running_loop().time()
         if (
             self._last_media_recovery is not None
@@ -341,26 +349,9 @@ class LibreSyncClient:
         ):
             _LOGGER.debug("7777 refused again inside the re-register cooldown; leaving it")
             return
-        self._media_recovering = True
         self._last_media_recovery = now
-        # `_on_media_frame` is synchronous, so this has to be a task — and a
-        # tracked one, cancelled on disconnect.
-        self._recovery_task = asyncio.create_task(
-            self._async_recover_media(), name="aiolibresync-reregister"
-        )
-
-    async def _async_recover_media(self) -> None:
-        """Drop the socket rather than re-send the register frame in place.
-
-        `_on_media_connect` is the only sequence known to produce a working
-        session, and by the time a refusal arrives everything read over that
-        socket is stale anyway — so the connect queries want re-reading too.
-        """
         _LOGGER.warning("the 7777 session is not registered; dropping it to register again")
-        try:
-            await self._media.drop()
-        finally:
-            self._media_recovering = False
+        self._media.drop()
 
     def _apply(self, patch: dict[str, Any]) -> None:
         """Fold a patch into the state, and notify only on a real change.
@@ -449,6 +440,8 @@ class LibreSyncClient:
             "state": self._redacted_state(),
             "counters": {
                 **self._counters,
+                "control_unknown": self._unknown_signatures["control"].total(),
+                "media_unknown": self._unknown_signatures["media"].total(),
                 "control_resyncs": self._control.resyncs,
                 "media_resyncs": self._media.resyncs,
             },
@@ -489,13 +482,17 @@ class LibreSyncClient:
         current = await self._async_read_power()
         if current is on:
             return
-        await self._control.send(systemcontrol.toggle_power())
-        await self._async_expect(lambda _patch, state: state.power is on)
+        await self._async_expect(
+            lambda _patch, state: state.power is on,
+            send=self._control.send(systemcontrol.toggle_power()),
+        )
 
     async def _async_read_power(self) -> bool | None:
-        await self._control.send(systemcontrol.QUERY_POWER)
         try:
-            state = await self._async_expect(lambda patch, _state: "power" in patch)
+            state = await self._async_expect(
+                lambda patch, _state: "power" in patch,
+                send=self._control.send(systemcontrol.QUERY_POWER),
+            )
         except ConfirmationTimeout:
             if self._state.power is None:
                 raise
@@ -513,9 +510,10 @@ class LibreSyncClient:
         port 50006 is down, `ConfirmationTimeout` if the device does not
         confirm in time.
         """
-        await self._control.send(systemcontrol.select_source(index))
+        frame = systemcontrol.select_source(index)
         await self._async_expect(
-            lambda _patch, state: state.source is not None and state.source.index == index
+            lambda _patch, state: state.source is not None and state.source.index == index,
+            send=self._control.send(frame),
         )
 
     async def async_set_volume(self, level: int) -> None:
@@ -525,8 +523,10 @@ class LibreSyncClient:
         `NotConnectedError` if port 7777 is down, `ConfirmationTimeout` if the
         device does not confirm in time.
         """
-        await self._media.send(media.set_volume(level))
-        await self._async_expect(lambda _patch, state: state.volume == level)
+        frame = media.set_volume(level)
+        await self._async_expect(
+            lambda _patch, state: state.volume == level, send=self._media.send(frame)
+        )
 
     async def async_media_play(self) -> None:
         """Play.
@@ -534,8 +534,9 @@ class LibreSyncClient:
         Raises `NotConnectedError` if port 7777 is down, `ConfirmationTimeout`
         if the device does not report a play state in time.
         """
-        await self._media.send(media.play())
-        await self._async_expect(lambda patch, _state: "play_state" in patch)
+        await self._async_expect(
+            lambda patch, _state: "play_state" in patch, send=self._media.send(media.play())
+        )
 
     async def async_media_pause(self) -> None:
         """Pause.
@@ -543,8 +544,9 @@ class LibreSyncClient:
         Raises `NotConnectedError` if port 7777 is down, `ConfirmationTimeout`
         if the device does not report a play state in time.
         """
-        await self._media.send(media.pause())
-        await self._async_expect(lambda patch, _state: "play_state" in patch)
+        await self._async_expect(
+            lambda patch, _state: "play_state" in patch, send=self._media.send(media.pause())
+        )
 
     async def async_media_stop(self) -> None:
         """Stop.
@@ -552,8 +554,9 @@ class LibreSyncClient:
         Raises `NotConnectedError` if port 7777 is down, `ConfirmationTimeout`
         if the device does not report a play state in time.
         """
-        await self._media.send(media.stop())
-        await self._async_expect(lambda patch, _state: "play_state" in patch)
+        await self._async_expect(
+            lambda patch, _state: "play_state" in patch, send=self._media.send(media.stop())
+        )
 
     async def async_media_next_track(self) -> None:
         """Next track. Indistinguishable from previous on the wire: the device
@@ -604,9 +607,12 @@ class LibreSyncClient:
             async with asyncio.timeout(self._confirm_timeout):
                 await asyncio.sleep(ROOM_REREAD_DELAY)
                 while True:
-                    await self._control.send(systemcontrol.QUERY_ROOM_CORRECTION)
                     try:
-                        await self._async_expect(confirmed, timeout=ROOM_REREAD_INTERVAL)
+                        await self._async_expect(
+                            confirmed,
+                            send=self._control.send(systemcontrol.QUERY_ROOM_CORRECTION),
+                            timeout=ROOM_REREAD_INTERVAL,
+                        )
                     except ConfirmationTimeout:
                         continue  # still stale: ask again, until the budget runs out
                     return
@@ -619,8 +625,10 @@ class LibreSyncClient:
         Raises `NotConnectedError` if port 50006 is down, `ConfirmationTimeout`
         if the device does not confirm in time.
         """
-        await self._control.send(systemcontrol.set_manual_eq(enabled))
-        await self._async_expect(lambda _patch, state: state.manual_eq is enabled)
+        await self._async_expect(
+            lambda _patch, state: state.manual_eq is enabled,
+            send=self._control.send(systemcontrol.set_manual_eq(enabled)),
+        )
 
     async def async_select_eq_preset(self, preset: int) -> None:
         """Select EQ preset 1..3.
@@ -629,17 +637,25 @@ class LibreSyncClient:
         `NotConnectedError` if port 50006 is down, `ConfirmationTimeout` if the
         device does not confirm in time.
         """
-        await self._control.send(systemcontrol.select_eq_preset(preset))
-        await self._async_expect(lambda _patch, state: state.eq_preset == preset)
+        frame = systemcontrol.select_eq_preset(preset)
+        await self._async_expect(
+            lambda _patch, state: state.eq_preset == preset, send=self._control.send(frame)
+        )
 
     async def _async_expect(
         self,
         predicate: Callable[[dict[str, Any], DeviceState], bool],
+        *,
+        send: Awaitable[None] | None = None,
         # The timeout is the point of this helper, not a parameter that should
         # have been an asyncio.timeout at the call site.
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> DeviceState:
-        """Wait for a decoded frame that satisfies `predicate`.
+        """Send a frame, then wait for a decoded frame that satisfies `predicate`.
+
+        The waiter is armed before `send` runs, so a reply that arrives while
+        the write is still draining is not missed. The send is not part of the
+        timeout, which bounds the device's answer only.
 
         The predicate sees the patch *and* the resulting state, because the two
         questions differ: "did the device report power at all" is about the
@@ -650,6 +666,8 @@ class LibreSyncClient:
         future: asyncio.Future[DeviceState] = asyncio.get_running_loop().create_future()
         self._waiters.append((predicate, future))
         try:
+            if send is not None:
+                await send
             async with asyncio.timeout(timeout if timeout is not None else self._confirm_timeout):
                 return await future
         except TimeoutError as err:

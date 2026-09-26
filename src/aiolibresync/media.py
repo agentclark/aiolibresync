@@ -36,7 +36,6 @@ from .const import (
     MID_VOLUME,
     MSG_COMMAND,
     MSG_QUERY,
-    POSITION_NONE,
     READ_MODEL_PAYLOAD,
     STATUS_NOT_REGISTERED,
     STATUS_REFUSED,
@@ -179,7 +178,7 @@ def parse_playview(payload: bytes) -> dict[str, Any] | None:
     )
     patch: dict[str, Any] = {"now_playing": track}
     state = contents.get("PlayState")
-    if isinstance(state, int) and state in tuple(PlayState):
+    if isinstance(state, int) and state in PlayState:
         patch["play_state"] = PlayState(state)
     return patch
 
@@ -227,10 +226,10 @@ def decode(frame: bytes) -> dict[str, Any] | None:
             return None
         # Signed. -1000 is the sentinel the device sends on STOP; parsed
         # unsigned it becomes a huge number and any seek UI misbehaves.
-        return {"position_ms": None if position <= POSITION_NONE or position < 0 else position}
+        return {"position_ms": None if position < 0 else position}
     if mid == MID_PLAY_STATE:
         value = _as_int(text)
-        if value is None or value not in tuple(PlayState):
+        if value is None or value not in PlayState:
             return None
         return {"play_state": PlayState(value)}
     if mid == MID_SPEAKER:

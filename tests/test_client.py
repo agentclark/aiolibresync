@@ -312,25 +312,60 @@ async def test_recovery_fires_once_per_cooldown_not_once_per_refusal(hub):
     await client.async_disconnect()
 
 
-async def test_available_stays_false_while_only_one_port_is_up(hub):
-    """`available` is the AND of both sockets, and it is not `power`."""
+def _one_dead_port_client(hub: FakeHub) -> LibreSyncClient:
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
     dead = probe.getsockname()[1]
     probe.close()  # nothing listens here
-
-    client = LibreSyncClient(
+    return LibreSyncClient(
         "127.0.0.1",
         control_port=hub.control_port,
         media_port=dead,
         base_delay=0.01,
         max_delay=0.02,
     )
+
+
+async def test_available_stays_false_while_only_one_port_is_up(hub):
+    """`available` is the AND of both sockets, and it is not `power`."""
+    client = _one_dead_port_client(hub)
     await client.async_connect()
     await until(lambda: client.state.power is not None)  # 50006 is fully up
 
     assert client.state.available is False
     await client.async_disconnect()
+
+
+async def test_connect_with_a_timeout_returns_once_both_ports_are_open(hub):
+    client = make_client(hub)
+    await client.async_connect(timeout=2.0)
+
+    assert client.state.available is True
+    await client.async_disconnect()
+
+
+async def test_connect_with_a_timeout_disconnects_before_raising(hub):
+    """A setup that gives up must not leave two reconnect loops and a poll behind."""
+    client = _one_dead_port_client(hub)
+
+    with pytest.raises(NotConnectedError):
+        await client.async_connect(timeout=0.2)
+
+    assert client._poll_task is None
+    await until(lambda: open_sockets(hub) == (0, 0))
+
+
+async def test_a_cancelled_connect_leaves_nothing_running(hub):
+    client = _one_dead_port_client(hub)
+    task = asyncio.create_task(client.async_connect(timeout=5.0))
+    await until(lambda: client.state.power is not None)  # 50006 is up, the wait goes on
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client._poll_task is None
+    await until(lambda: open_sockets(hub) == (0, 0))
 
 
 def test_a_patch_naming_something_that_is_not_a_field_raises():
@@ -720,7 +755,7 @@ async def test_the_poll_loop_survives_the_socket_going_away_and_resumes(hub):
     await until(lambda: client.state.model is not None)
     hub.received["control"].clear()
 
-    await client._control.drop()  # the socket goes, the loop must not
+    client._control.drop()  # the socket goes, the loop must not
 
     # 02 01 comes only from the connect burst, so it is the evidence that the
     # socket really did go away and come back rather than never dropping.

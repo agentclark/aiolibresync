@@ -9,6 +9,7 @@ and pretending otherwise costs more than it saves.
 """
 
 import asyncio
+import contextlib
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -98,14 +99,12 @@ class Connection:
     async def stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         self._close_writer()
 
-    async def drop(self) -> None:
+    def drop(self) -> None:
         """Force the current socket down; `_run` reconnects and re-runs on_connect.
 
         Protocol-agnostic on purpose. The caller decides *when* a session is
@@ -113,20 +112,24 @@ class Connection:
         """
         self._close_writer()
 
-    async def send(self, data: bytes) -> None:
-        """Write to the socket, or raise NotConnectedError.
+    async def send(self, *frames: bytes) -> None:
+        """Write each frame in turn to the socket, or raise NotConnectedError.
+
+        One write and one drain per frame, never coalesced: whether the
+        firmware accepts two frames in one segment has not been measured.
 
         A drop between the check and the drain raises OSError, and normalising
         it here makes NotConnectedError the one signal every caller has to know.
         """
-        writer = self._writer
-        if writer is None or not self._connected:
-            raise NotConnectedError(f"{self.host}:{self.port} is not connected")
-        try:
-            writer.write(data)
-            await writer.drain()
-        except OSError as err:
-            raise NotConnectedError(f"{self.host}:{self.port} dropped mid-write") from err
+        for frame in frames:
+            writer = self._writer
+            if writer is None or not self._connected:
+                raise NotConnectedError(f"{self.host}:{self.port} is not connected")
+            try:
+                writer.write(frame)
+                await writer.drain()
+            except OSError as err:
+                raise NotConnectedError(f"{self.host}:{self.port} dropped mid-write") from err
 
     async def _run(self) -> None:
         attempt = 0

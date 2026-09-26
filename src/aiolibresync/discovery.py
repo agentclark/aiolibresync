@@ -230,15 +230,10 @@ def _http_body(raw: bytes) -> bytes | None:
     head, separator, body = raw.partition(b"\r\n\r\n")
     if not separator:
         return None
-    lines = head.decode("utf-8", errors="replace").splitlines()
-    status = lines[0].split()
-    if len(status) < 2 or status[1] != "200":
+    status = head.split(b"\r\n", 1)[0].split()
+    if len(status) < 2 or status[1] != b"200":
         return None
-    headers = {
-        name.strip().lower(): value.strip()
-        for name, separator, value in (line.partition(":") for line in lines[1:])
-        if separator
-    }
+    headers = parse_ssdp_headers(head)
     if "chunked" in headers.get("transfer-encoding", "").lower():
         return _dechunk(body)
     return body
@@ -332,9 +327,7 @@ async def async_read_serial(
                         await writer.drain()
                         asked = True
                     elif mid == MID_SERIAL:
-                        patch = media.decode(frame)
-                        serial = patch.get("serial") if patch else None
-                        return serial if isinstance(serial, str) else None
+                        return media.parse_serial(frame[frames.MEDIA_HEADER :])
     except (OSError, TimeoutError):
         return None
     finally:
@@ -345,13 +338,13 @@ async def async_read_serial(
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredDevice:
-    """A hub on the network, with the identity a config entry needs.
+    """A hub on the network, as its UPnP description presents it.
 
-    `udn` is the `unique_id`: it survived seven months, a reboot and a subnet
-    change, and it is what SSDP carries in its `USN`. It is None only on the
-    manual path, when the address is known but the UPnP renderer did not answer
-    — see `async_probe`. A factory reset mints a new one and orphans the entry,
-    which is a documentation item rather than something to detect.
+    `udn` survived seven months, a reboot and a subnet change, and it is what
+    SSDP carries in its `USN`. It is None only on the manual path, when the
+    address is known but the UPnP renderer did not answer — see `async_probe`.
+    The factory serial, which does not depend on that renderer, is the
+    identifier to prefer where it can be read: see `async_read_serial`.
     """
 
     host: str
@@ -404,6 +397,12 @@ async def _async_identify(host: str, location: str) -> DiscoveredDevice | None:
     if not await async_probe_control(host, CONTROL_PORT):
         _LOGGER.debug("%s looks like ours but port %d is closed", host, CONTROL_PORT)
         return None
+    return _discovered(host, location, description, CONTROL_PORT)
+
+
+def _discovered(
+    host: str, location: str, description: DeviceDescription, control_port: int
+) -> DiscoveredDevice:
     return DiscoveredDevice(
         host=host,
         udn=description.udn,
@@ -411,7 +410,7 @@ async def _async_identify(host: str, location: str) -> DiscoveredDevice | None:
         model=description.model_name,
         manufacturer=description.manufacturer,
         description_url=location,
-        control_port=CONTROL_PORT,
+        control_port=control_port,
     )
 
 
@@ -487,12 +486,4 @@ async def async_probe(
     if description is None:
         _LOGGER.debug("%s answers on %d but served no description", host, control_port)
         return DiscoveredDevice(host=host, control_port=control_port)
-    return DiscoveredDevice(
-        host=host,
-        udn=description.udn,
-        name=description.friendly_name,
-        model=description.model_name,
-        manufacturer=description.manufacturer,
-        description_url=location,
-        control_port=control_port,
-    )
+    return _discovered(host, location, description, control_port)

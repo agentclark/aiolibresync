@@ -5,28 +5,25 @@
 
     async def main() -> None:
         client = LibreSyncClient("192.168.1.50")
-        ready = asyncio.Event()
 
         def on_state(state: DeviceState) -> None:
             print(state)
-            if state.available:
-                ready.set()
 
         client.subscribe(on_state)
-        await client.async_connect()
-        await ready.wait()
+        await client.async_connect(timeout=10)
         await client.async_set_power(True)
         await asyncio.sleep(60)
         await client.async_disconnect()
 
     asyncio.run(main())
 
-`async_connect()` returns as soon as the two sockets have been *scheduled*, not
-once they are open, so a command issued on the next line raises
-`NotConnectedError`. `state.available` is the readiness signal — it turns true
-when both ports are connected — and waiting on it is what the example's
-`asyncio.Event` is for. It goes false again on any disconnection, so a long-
-running program should treat it as a condition, not a one-off.
+With a `timeout`, `async_connect()` returns once both ports are open and raises
+`NotConnectedError` if they are not in time, leaving nothing running. Without
+one it returns as soon as the two sockets have been *scheduled*, so a command
+issued on the next line raises `NotConnectedError`. Either way,
+`state.available` goes false again on any disconnection and true when the
+client has reconnected on its own, so a long-running program should treat it
+as a condition, not a one-off.
 
 `DeviceState` reports playback twice, because the hub does. `play_state` is the
 streaming renderer's transport and answers `PLAYING` to a physical input with
@@ -54,6 +51,8 @@ argument is a LUCI message-box id, and the box space includes factory reset.
 Use the named operations in `aiolibresync.media` instead.
 """
 
+from importlib.metadata import version
+
 from .client import LibreSyncClient
 from .const import CONTROL_PORT, MEDIA_PORT, POLL_INTERVAL
 from .discovery import DiscoveredDevice, async_discover, async_probe, async_read_serial
@@ -65,7 +64,7 @@ from .exceptions import (
 )
 from .state import DeviceState, NowPlaying, PlayState, Source
 
-__version__ = "0.2.0"
+__version__ = version(__name__)
 
 __all__ = [
     "CONTROL_PORT",

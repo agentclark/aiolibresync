@@ -44,16 +44,12 @@ from aiolibresync import DeviceState, LibreSyncClient
 
 async def main() -> None:
     client = LibreSyncClient("192.168.1.50")
-    ready = asyncio.Event()
 
     def on_state(state: DeviceState) -> None:
         print(state)
-        if state.available:
-            ready.set()
 
     client.subscribe(on_state)
-    await client.async_connect()
-    await ready.wait()
+    await client.async_connect(timeout=10)
     await client.async_set_volume(30)
     await asyncio.sleep(60)
     await client.async_disconnect()
@@ -61,7 +57,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`async_connect()` returns as soon as the two sockets have been *scheduled*, not once they are open, so a command issued on the next line raises `NotConnectedError`. `state.available` is the readiness signal: it becomes true when both ports are connected and false again on any disconnection. The client reconnects on its own, so treat `available` as a condition that can change at any time.
+With a `timeout`, `async_connect()` returns once both ports are open, and raises `NotConnectedError` if they are not in time, after disconnecting again so that nothing is left running. Without one it returns as soon as the two sockets have been *scheduled*, so a command issued on the next line raises `NotConnectedError`. Either way `state.available` becomes false on any disconnection and true again when the client has reconnected on its own, so treat it as a condition that can change at any time.
 
 | Method | What it does |
 | --- | --- |

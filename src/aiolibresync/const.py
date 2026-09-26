@@ -138,7 +138,6 @@ KNOWN_UNDECODED_MIDS: Final = frozenset(
 TRANSPORT_PAYLOADS: Final = frozenset({b"PLAY", b"PAUSE", b"STOP", b"NEXT", b"PREV"})
 READ_MODEL_PAYLOAD: Final = b"READ_Model"
 
-POSITION_NONE: Final = -1000  # the sentinel the device sends on STOP
 MAX_MID: Final = 0x01F7  # luci_service's dispatch tops out here
 MAX_PAYLOAD: Final = 0x1400  # MID_LENGTH_MAX
 MIN_CONTROL_BODY: Final = 3  # checksum + class + opcode

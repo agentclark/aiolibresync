@@ -72,24 +72,24 @@ def test_a_message_box_of_the_wrong_type_is_refused_as_unsafe(mid):
 
 
 def test_decode_volume_and_mute():
-    assert media.decode(_device(0x0040, b"30")) == {"volume": 30}
-    assert media.decode(_device(0x003F, b"MUTE")) == {"muted": True}
-    assert media.decode(_device(0x003F, b"UNMUTE")) == {"muted": False}
+    assert media.decode(device_frame(0x0040, b"30")) == {"volume": 30}
+    assert media.decode(device_frame(0x003F, b"MUTE")) == {"muted": True}
+    assert media.decode(device_frame(0x003F, b"UNMUTE")) == {"muted": False}
 
 
 def test_decode_play_state():
-    assert media.decode(_device(0x0033, b"0")) == {"play_state": PlayState.PLAYING}
-    assert media.decode(_device(0x0033, b"2")) == {"play_state": PlayState.PAUSED}
+    assert media.decode(device_frame(0x0033, b"0")) == {"play_state": PlayState.PLAYING}
+    assert media.decode(device_frame(0x0033, b"2")) == {"play_state": PlayState.PAUSED}
 
 
 def test_position_is_signed_and_minus_one_thousand_means_no_position():
-    assert media.decode(_device(0x0031, b"32563")) == {"position_ms": 32563}
-    assert media.decode(_device(0x0031, b"-1000")) == {"position_ms": None}
+    assert media.decode(device_frame(0x0031, b"32563")) == {"position_ms": 32563}
+    assert media.decode(device_frame(0x0031, b"-1000")) == {"position_ms": None}
 
 
 def test_speaker_state_is_the_stop_signal():
-    assert media.decode(_device(0x0046, b"SPEAKER_ACTIVE,24")) == {"speakers_active": True}
-    assert media.decode(_device(0x0046, b"SPEAKER_INACTIVE,24")) == {"speakers_active": False}
+    assert media.decode(device_frame(0x0046, b"SPEAKER_ACTIVE,24")) == {"speakers_active": True}
+    assert media.decode(device_frame(0x0046, b"SPEAKER_INACTIVE,24")) == {"speakers_active": False}
 
 
 def test_decode_playview_gives_a_media_player_payload():
@@ -138,24 +138,26 @@ def test_the_playview_twin_produces_an_equal_patch():
             }
         }
     ).encode()
-    assert media.decode(_device(0x002A, payload)) == media.decode(_device(0x002D, payload))
+    assert media.decode(device_frame(0x002A, payload)) == media.decode(
+        device_frame(0x002D, payload)
+    )
 
 
 def test_a_refused_request_is_not_a_value():
     """status 0x02 comes back with an empty payload; so does a real empty reply."""
-    assert media.decode(_device(0x0040, b"", status=0x02)) == {}
-    assert media.is_refused(_device(0x0040, b"", status=0x02))
+    assert media.decode(device_frame(0x0040, b"", status=0x02)) == {}
+    assert media.is_refused(device_frame(0x0040, b"", status=0x02))
 
 
 def test_an_unregistered_session_is_detected_by_status_not_by_the_box():
-    frame = _device(0x0000, b"", status=0x03)
+    frame = device_frame(0x0000, b"", status=0x03)
     assert media.is_not_registered(frame)
     assert media.decode(frame) == {}
 
 
 def test_status_one_is_not_a_reply_flag():
     """The unsolicited 0x01ee track-change push carries status 0x01 too."""
-    frame = _device(0x01EE, b"", status=0x01)
+    frame = device_frame(0x01EE, b"", status=0x01)
     assert media.mid_of(frame) == 0x01EE
     assert media.decode(frame) == {}
 
@@ -176,22 +178,6 @@ def test_every_media_frame_in_every_capture_is_understood():
             if media.decode(frame) is None:
                 unknown.add(media.mid_of(frame))
     assert unknown <= {0x00E0}
-
-
-def _device(mid: int, payload: bytes, status: int = 0x01) -> bytes:
-    """Build a device->client frame: 16-bit fields big-endian, real CRC."""
-    from aiolibresync.frames import media_crc
-
-    frame = (
-        b"\x00\x00"
-        + bytes([0x02])
-        + mid.to_bytes(2, "big")
-        + bytes([status])
-        + b"\x00\x00"
-        + len(payload).to_bytes(2, "big")
-        + payload
-    )
-    return frame[:6] + media_crc(frame).to_bytes(2, "big") + frame[8:]
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,8 @@ must stay importable and testable without a device and without an event loop,
 which is what Home Assistant requires of an external library.
 """
 
+import binascii
+
 from .const import (
     MAX_CONTROL_BODY,
     MAX_PAYLOAD,
@@ -29,12 +31,7 @@ def checksum(payload: bytes) -> int:
 
 def crc16_ccitt(data: bytes) -> int:
     """CRC-16/XMODEM: poly 0x1021, init 0x0000, no reflection, no final xor."""
-    crc = 0
-    for byte in data:
-        crc ^= byte << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
+    return binascii.crc_hqx(data, 0)
 
 
 def media_crc(frame: bytes) -> int:
