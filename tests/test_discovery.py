@@ -569,3 +569,26 @@ async def test_the_probe_reports_the_module(monkeypatch):
     assert found is not None
     assert found.udn == UDN
     assert found.module == "LS10"
+
+
+async def test_a_socket_error_on_the_udp_queries_costs_only_what_they_find(monkeypatch):
+    """The control port has answered: no socket for LSSDP or the search must
+    not turn into no device."""
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    loop = asyncio.get_running_loop()
+
+    async def refuse(*_args, **_kwargs):
+        raise OSError("no socket")
+
+    try:
+        monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
+        monkeypatch.setattr(discovery, "UPNP_PORT", 1)
+        monkeypatch.setattr(loop, "create_datagram_endpoint", refuse)
+        found = await discovery.async_probe("127.0.0.1")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn is None
+    assert found.module is None

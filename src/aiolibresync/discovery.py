@@ -402,9 +402,13 @@ async def async_query_lssdp(
             if (info := parse_lssdp(data)) is not None:
                 answer.set_result(info)
 
-    transport, _protocol = await loop.create_datagram_endpoint(
-        _Listener, local_addr=("0.0.0.0", 0), family=socket.AF_INET
-    )
+    try:
+        transport, _protocol = await loop.create_datagram_endpoint(
+            _Listener, local_addr=("0.0.0.0", 0), family=socket.AF_INET
+        )
+    except OSError as err:
+        _LOGGER.debug("no socket for the LSSDP query: %s", err)
+        return None
     try:
         deadline = loop.time() + timeout
         while (remaining := deadline - loop.time()) > 0:
@@ -593,7 +597,15 @@ async def _async_search_location(host: str) -> str | None:
     except OSError:
         return None
     address = str(infos[0][4][0])
-    found = await _async_msearch(timeout=UNICAST_SEARCH_TIMEOUT, source_ip=None, address=address)
+    try:
+        found = await _async_msearch(
+            timeout=UNICAST_SEARCH_TIMEOUT, source_ip=None, address=address
+        )
+    except OSError as err:
+        # The control port has answered by now: a failed search costs the
+        # identity, not the device.
+        _LOGGER.debug("no socket for the search: %s", err)
+        return None
     return found.get(address)
 
 
