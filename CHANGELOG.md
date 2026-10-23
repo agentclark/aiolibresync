@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0b2 — 2026-10-23
+
+- The unicast M-SEARCH that `async_probe` sends to a single host names the multicast group in its `HOST` header, as a multicast search does. The Stereo Hub HT ignores a search that names its own address, so 0.6.0b1 found no description on it and the hub had no identity. The original Stereo Hub answers either form.
+
 ## 0.6.0b1 — 2026-10-23
 
 Beta, for the newer Platin hubs (Stereo Hub HT, Surround Hub). Everything is backward compatible: code written for 0.5 runs unchanged.
