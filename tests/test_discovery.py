@@ -397,6 +397,20 @@ async def test_a_search_to_one_host_is_sent_until_it_answers(monkeypatch):
     assert device.searches > discovery.SSDP_ATTEMPTS
 
 
+async def test_a_search_to_one_host_still_names_the_group(monkeypatch):
+    # The Stereo Hub HT ignores a search whose HOST header is its own address,
+    # even when the datagram is sent to it alone.
+    device = FakeSSDPDevice(DESCRIPTION, group_host_only=True)
+    await device.start()
+    try:
+        found = await _probe_on_its_own_port(monkeypatch, device, "127.0.0.1")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn == UDN
+
+
 async def test_a_typed_name_is_resolved_before_asking(monkeypatch):
     # The reply comes from an address, never from the name the user typed.
     device = FakeSSDPDevice(DESCRIPTION)

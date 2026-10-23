@@ -454,6 +454,9 @@ class FakeSSDPDevice:
     `replies` is how many datagrams it answers each search with. A real device
     answers a MediaRenderer search once and an `ssdp:all` search once per
     embedded device and service, and discovery has to collapse that.
+
+    `group_host_only` ignores a search whose `HOST` header is not the multicast
+    group, even one sent to the device alone, as the Stereo Hub HT does.
     """
 
     def __init__(
@@ -463,8 +466,10 @@ class FakeSSDPDevice:
         udn: str = "uuid:1a2b3c4d-5e6f-11f0-9193-0123456789ab",
         control: bool = True,
         replies: int = 1,
+        group_host_only: bool = False,
     ) -> None:
         self.udn = udn
+        self.group_host_only = group_host_only
         self.searches = 0
         self.control_wanted = control
         self._replies = replies
@@ -529,6 +534,8 @@ class FakeSSDPDevice:
             if not data.startswith(b"M-SEARCH") or self._transport is None:
                 return
             self._device.searches += 1
+            if self._device.group_host_only and b"HOST: 239.255.255.250:" not in data:
+                return
             reply = SSDP_TEMPLATE.format(
                 location=self._device.location(), udn=self._device.udn
             ).encode()

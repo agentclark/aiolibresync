@@ -558,7 +558,9 @@ async def _async_msearch(
                 sock.setsockopt(
                     socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(source_ip)
                 )
-        message = build_msearch(target, SSDP_PORT, SSDP_ST, SSDP_MX)
+        # The HOST header names the group even when the search goes to one
+        # host: the Stereo Hub HT ignores a search that names its own address.
+        message = build_msearch(SSDP_ADDRESS, SSDP_PORT, SSDP_ST, SSDP_MX)
         deadline = loop.time() + timeout
         sends = range(SSDP_ATTEMPTS) if address is None else itertools.count()
         for _attempt in sends:
