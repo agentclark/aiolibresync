@@ -50,13 +50,15 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-#: What marks a description as ours, both lower-cased before comparison.
+#: What marks a description as ours, all lower-cased before comparison.
 #: `manufacturer` is the stock string on this unit. `modelDescription` is
 #: checked as well because a rebranded device is likely to carry its own brand
 #: as the manufacturer while keeping the LibreSync DMR string — and neither
 #: half is guaranteed, which is why the TCP probe is what actually confirms.
+#: `C4A Wireless Speaker` is what the newer Platin hubs (Stereo Hub HT, Surround
+#: Hub) report, with `Platin` as the manufacturer, in two owners' reports.
 _MANUFACTURER_MARK = "librewireless"
-_MODEL_DESCRIPTION_MARK = "libresync"
+_MODEL_DESCRIPTION_MARKS = ("libresync", "c4a wireless speaker")
 
 _WANTED_TAGS = frozenset({"UDN", "friendlyName", "manufacturer", "modelName", "modelDescription"})
 
@@ -79,9 +81,8 @@ class DeviceDescription:
     @property
     def is_libresync(self) -> bool:
         """Whether this description is worth a TCP probe."""
-        return (
-            _MANUFACTURER_MARK in (self.manufacturer or "").lower()
-            or _MODEL_DESCRIPTION_MARK in (self.model_description or "").lower()
+        return _MANUFACTURER_MARK in (self.manufacturer or "").lower() or any(
+            mark in (self.model_description or "").lower() for mark in _MODEL_DESCRIPTION_MARKS
         )
 
 
@@ -419,15 +420,24 @@ async def _async_msearch(
     *,
     timeout: float,  # noqa: ASYNC109 — see async_discover
     source_ip: str | None,
+    address: str | None = None,
 ) -> dict[str, str]:
     """Host to `LOCATION`, for everything that answered within `timeout`.
 
     A reply whose `LOCATION` names a host other than its sender is dropped: the
     description would then speak for a different machine from the one probed
     afterwards.
+
+    With `address`, the search goes to that host alone instead of the multicast
+    group, and ends as soon as that host answers. A host with nothing on the
+    SSDP port costs the whole `timeout`: an unconnected UDP socket is not told
+    of the refusal, and a connected one would drop the replies that come from
+    a port other than 1900.
     """
     loop = asyncio.get_running_loop()
     found: dict[str, str] = {}
+    target = address or SSDP_ADDRESS
+    done = asyncio.Event()
 
     class _Collector(asyncio.DatagramProtocol):
         def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
@@ -436,6 +446,8 @@ async def _async_msearch(
             if not location:
                 return
             host = str(addr[0])
+            if address is not None and host != address:
+                return
             _LOGGER.debug("SSDP reply from %s: %s", host, headers)
             try:
                 named = urlsplit(location).hostname
@@ -446,6 +458,8 @@ async def _async_msearch(
                 return
             if host in found or len(found) < MAX_SSDP_CANDIDATES:
                 found.setdefault(host, location)
+            if address is not None:
+                done.set()
 
     transport, _protocol = await loop.create_datagram_endpoint(
         _Collector, local_addr=(source_ip or "0.0.0.0", 0), family=socket.AF_INET
@@ -458,22 +472,50 @@ async def _async_msearch(
                 sock.setsockopt(
                     socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(source_ip)
                 )
-        message = build_msearch(SSDP_ADDRESS, SSDP_PORT, SSDP_ST, SSDP_MX)
+        message = build_msearch(target, SSDP_PORT, SSDP_ST, SSDP_MX)
         deadline = loop.time() + timeout
         for _attempt in range(SSDP_ATTEMPTS):
-            transport.sendto(message, (SSDP_ADDRESS, SSDP_PORT))
+            if done.is_set():
+                break
+            transport.sendto(message, (target, SSDP_PORT))
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
-            # The replies arrive on the protocol's callback; this sleep is what
+            # The replies arrive on the protocol's callback; this wait is what
             # gives the event loop the chance to run it.
-            await asyncio.sleep(min(SSDP_RETRY_INTERVAL, remaining))
+            await _wait(done, min(SSDP_RETRY_INTERVAL, remaining))
         remaining = deadline - loop.time()
-        if remaining > 0:
-            await asyncio.sleep(remaining)
+        if remaining > 0 and not done.is_set():
+            await _wait(done, remaining)
     finally:
         transport.close()
     return found
+
+
+async def _wait(event: asyncio.Event, timeout: float) -> None:  # noqa: ASYNC109
+    """Wait for `event`, or `timeout` seconds, whichever comes first."""
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(event.wait(), timeout)
+
+
+async def _async_search_location(
+    host: str,
+    *,
+    timeout: float,  # noqa: ASYNC109 — see async_probe_control
+) -> str | None:
+    """The `LOCATION` that `host` names in reply to a search sent to it alone.
+
+    The reply comes from an address, so a name is resolved first.
+    """
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, SSDP_PORT, family=socket.AF_INET, type=socket.SOCK_DGRAM
+        )
+    except OSError:
+        return None
+    address = str(infos[0][4][0])
+    found = await _async_msearch(timeout=timeout, source_ip=None, address=address)
+    return found.get(address)
 
 
 async def async_probe(
@@ -494,11 +536,18 @@ async def async_probe(
     control_port = port or CONTROL_PORT
     if not await async_probe_control(host, control_port, timeout=timeout):
         return None
-    # There is no LOCATION header on this path, so the description URL is the
-    # one the hub has always served. `URLBase` inside the document is
-    # no help: it is baked at boot and still carries the hub's old address.
+    # There is no LOCATION header on this path, so the description URL is first
+    # the one this hub has always served. `URLBase` inside the document is no
+    # help: it is baked at boot and still carries the hub's old address.
     location = f"http://{host}:{UPNP_PORT}{DESCRIPTION_PATH}"
     description = await async_fetch_description(location, timeout=timeout)
+    if description is None:
+        # The newer hubs serve it on a port of their own choosing, which only
+        # the LOCATION of a search reply names. Ask the host alone.
+        searched = await _async_search_location(host, timeout=timeout)
+        if searched is not None and searched != location:
+            location = searched
+            description = await async_fetch_description(location, timeout=timeout)
     if description is None:
         _LOGGER.debug("%s answers on %d but served no description", host, control_port)
         return DiscoveredDevice(host=host, control_port=control_port)

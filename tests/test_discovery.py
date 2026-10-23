@@ -75,6 +75,24 @@ def test_a_rebranded_device_is_recognised_by_its_model_description():
     assert desc.is_libresync
 
 
+def test_a_newer_platin_hub_is_recognised_by_its_model_description():
+    # The Stereo Hub HT and the Surround Hub: Platin as the manufacturer, and
+    # none of the stock strings.
+    xml = b"""<?xml version="1.0"?>
+    <root xmlns="urn:schemas-upnp-org:device-1-0"><device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+    <friendlyName>Living room</friendlyName><manufacturer>Platin</manufacturer>
+    <modelName>Stereo Hub HT</modelName><modelNumber>2.0</modelNumber>
+    <modelDescription>C4A Wireless Speaker</modelDescription>
+    <UDN>uuid:cccccccc-0000-0000-0000-000000000000</UDN>
+    </device></root>"""
+
+    desc = discovery.parse_description(xml)
+
+    assert desc is not None
+    assert desc.is_libresync
+
+
 def test_a_document_type_declaration_is_refused():
     # This parses a reply from a host nobody has identified yet.
     xml = b"""<?xml version="1.0"?><!DOCTYPE root [<!ENTITY a "x">]>
@@ -304,13 +322,70 @@ async def test_a_reachable_hub_with_no_upnp_still_probes(monkeypatch):
     try:
         monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
         monkeypatch.setattr(discovery, "UPNP_PORT", 1)
-        found = await discovery.async_probe("127.0.0.1")
+        monkeypatch.setattr(discovery, "SSDP_PORT", 1)
+        found = await discovery.async_probe("127.0.0.1", timeout=0.5)
     finally:
         await device.stop()
 
     assert found is not None
     assert found.host == "127.0.0.1"
     assert found.udn is None
+
+
+async def _probe_on_its_own_port(monkeypatch, device: FakeSSDPDevice, host: str):
+    """Nothing on the usual description port; the description is where the
+    device's own search reply says, as on the newer Platin hubs."""
+    monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
+    monkeypatch.setattr(discovery, "UPNP_PORT", 1)
+    monkeypatch.setattr(discovery, "SSDP_PORT", device.ssdp_port)
+    return await discovery.async_probe(host, timeout=2.0)
+
+
+async def test_a_description_on_another_port_is_found_by_asking_the_host(monkeypatch):
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        started = asyncio.get_running_loop().time()
+        found = await _probe_on_its_own_port(monkeypatch, device, "127.0.0.1")
+        elapsed = asyncio.get_running_loop().time() - started
+        location = device.location()
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn == UDN
+    assert found.description_url == location
+    assert device.searches == 1
+    # The search ends on the answer rather than waiting out its timeout.
+    assert elapsed < 1.0
+
+
+async def test_a_typed_name_is_resolved_before_asking(monkeypatch):
+    # The reply comes from an address, never from the name the user typed.
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        found = await _probe_on_its_own_port(monkeypatch, device, "localhost")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn == UDN
+
+
+async def test_a_search_reply_naming_another_host_is_not_followed(monkeypatch):
+    device = FakeSSDPDevice(DESCRIPTION)
+    await device.start()
+    try:
+        elsewhere = device.location().replace("127.0.0.1", "127.0.0.2")
+        device.location = lambda: elsewhere  # type: ignore[method-assign]
+        found = await _probe_on_its_own_port(monkeypatch, device, "127.0.0.1")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn is None
+    assert device.description_requests == []
 
 
 async def test_an_address_with_nothing_on_it_is_none():
