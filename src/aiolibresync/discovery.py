@@ -19,6 +19,7 @@ itself, which is not the same as being the device it claims to be.
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import socket
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ from .const import (
     SSDP_RETRY_INTERVAL,
     SSDP_ST,
     SSDP_TTL,
+    UNICAST_SEARCH_TIMEOUT,
     UPNP_PORT,
 )
 
@@ -429,10 +431,11 @@ async def _async_msearch(
     afterwards.
 
     With `address`, the search goes to that host alone instead of the multicast
-    group, and ends as soon as that host answers. A host with nothing on the
-    SSDP port costs the whole `timeout`: an unconnected UDP socket is not told
-    of the refusal, and a connected one would drop the replies that come from
-    a port other than 1900.
+    group, is sent again every `SSDP_RETRY_INTERVAL` until the `timeout` rather
+    than `SSDP_ATTEMPTS` times, and ends as soon as that host answers. A host
+    with nothing on the SSDP port costs the whole `timeout`: an unconnected UDP
+    socket is not told of the refusal, and a connected one would drop the
+    replies that come from a port other than 1900.
     """
     loop = asyncio.get_running_loop()
     found: dict[str, str] = {}
@@ -474,7 +477,8 @@ async def _async_msearch(
                 )
         message = build_msearch(target, SSDP_PORT, SSDP_ST, SSDP_MX)
         deadline = loop.time() + timeout
-        for _attempt in range(SSDP_ATTEMPTS):
+        sends = range(SSDP_ATTEMPTS) if address is None else itertools.count()
+        for _attempt in sends:
             if done.is_set():
                 break
             transport.sendto(message, (target, SSDP_PORT))
@@ -498,11 +502,7 @@ async def _wait(event: asyncio.Event, timeout: float) -> None:  # noqa: ASYNC109
         await asyncio.wait_for(event.wait(), timeout)
 
 
-async def _async_search_location(
-    host: str,
-    *,
-    timeout: float,  # noqa: ASYNC109 — see async_probe_control
-) -> str | None:
+async def _async_search_location(host: str) -> str | None:
     """The `LOCATION` that `host` names in reply to a search sent to it alone.
 
     The reply comes from an address, so a name is resolved first.
@@ -514,7 +514,7 @@ async def _async_search_location(
     except OSError:
         return None
     address = str(infos[0][4][0])
-    found = await _async_msearch(timeout=timeout, source_ip=None, address=address)
+    found = await _async_msearch(timeout=UNICAST_SEARCH_TIMEOUT, source_ip=None, address=address)
     return found.get(address)
 
 
@@ -544,7 +544,7 @@ async def async_probe(
     if description is None:
         # The newer hubs serve it on a port of their own choosing, which only
         # the LOCATION of a search reply names. Ask the host alone.
-        searched = await _async_search_location(host, timeout=timeout)
+        searched = await _async_search_location(host)
         if searched is not None and searched != location:
             location = searched
             description = await async_fetch_description(location, timeout=timeout)

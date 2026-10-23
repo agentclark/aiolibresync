@@ -323,6 +323,7 @@ async def test_a_reachable_hub_with_no_upnp_still_probes(monkeypatch):
         monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
         monkeypatch.setattr(discovery, "UPNP_PORT", 1)
         monkeypatch.setattr(discovery, "SSDP_PORT", 1)
+        monkeypatch.setattr(discovery, "UNICAST_SEARCH_TIMEOUT", 0.5)
         found = await discovery.async_probe("127.0.0.1", timeout=0.5)
     finally:
         await device.stop()
@@ -338,6 +339,7 @@ async def _probe_on_its_own_port(monkeypatch, device: FakeSSDPDevice, host: str)
     monkeypatch.setattr(discovery, "CONTROL_PORT", device.control_port)
     monkeypatch.setattr(discovery, "UPNP_PORT", 1)
     monkeypatch.setattr(discovery, "SSDP_PORT", device.ssdp_port)
+    monkeypatch.setattr(discovery, "UNICAST_SEARCH_TIMEOUT", 2.0)
     return await discovery.async_probe(host, timeout=2.0)
 
 
@@ -358,6 +360,23 @@ async def test_a_description_on_another_port_is_found_by_asking_the_host(monkeyp
     assert device.searches == 1
     # The search ends on the answer rather than waiting out its timeout.
     assert elapsed < 1.0
+
+
+async def test_a_search_to_one_host_is_sent_until_it_answers(monkeypatch):
+    # The hub's own responder drops searches, and on the newer hubs this is the
+    # only way to the description, so three sends are not the limit here.
+    device = FakeSSDPDevice(DESCRIPTION, replies=0)
+    await device.start()
+    try:
+        monkeypatch.setattr(discovery, "SSDP_RETRY_INTERVAL", 0.1)
+        asyncio.get_running_loop().call_later(0.45, setattr, device, "_replies", 1)
+        found = await _probe_on_its_own_port(monkeypatch, device, "127.0.0.1")
+    finally:
+        await device.stop()
+
+    assert found is not None
+    assert found.udn == UDN
+    assert device.searches > discovery.SSDP_ATTEMPTS
 
 
 async def test_a_typed_name_is_resolved_before_asking(monkeypatch):

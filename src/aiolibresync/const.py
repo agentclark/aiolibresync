@@ -182,6 +182,10 @@ SSDP_TTL: Final = 2  # one router hop, for the site that routes multicast
 SSDP_ATTEMPTS: Final = 3
 SSDP_RETRY_INTERVAL: Final = 1.0
 DISCOVERY_TIMEOUT: Final = 5.0
+#: A search sent to one host is sent again every `SSDP_RETRY_INTERVAL` until it
+#: answers or this runs out. On the newer hubs it is the only way to the
+#: description, and this hub's own responder dropped 1 search in 8 on 2026-10-23.
+UNICAST_SEARCH_TIMEOUT: Final = 10.0
 #: Hosts one search follows up with an HTTP fetch, all at once. Far more
 #: renderers than a home has; the cap is for a sender that answers from many
 #: addresses, which would otherwise open that many connections.
