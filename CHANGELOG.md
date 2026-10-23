@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0b1 — 2026-10-23
+
+Beta, for the newer Platin hubs (Stereo Hub HT, Surround Hub). Everything is backward compatible: code written for 0.5 runs unchanged.
+
+- `async_probe` finds a device description served on a port of the hub's own choosing. When nothing answers on 38400, it asks the host alone with a unicast M-SEARCH, resent every second for up to 10 s, and follows the `LOCATION` of the reply. A host name is resolved first.
+- The `C4A Wireless Speaker` model description of the newer hubs is recognised as LibreSync.
+- `async_query_lssdp(host)` asks a hub on Libre's discovery port, UDP 1800, and returns an `LssdpInfo` with the module, model, firmware and media port. The module is `LS9` on the original Stereo Hub and `LS10` on the newer ones. `async_probe` reports it as `DiscoveredDevice.module`.
+- `LibreSyncClient(media=False)` uses port 50006 alone and is available when it is, for hubs whose 7777 is wrapped in mutual TLS. The 7777 commands then raise `NotConnectedError`.
+- A socket error on the UDP queries costs `async_probe` the module or the identity, never the device.
+
 ## 0.5.1 — 2026-09-26
 
 - `async_media_play()`, `async_media_pause()` and `async_media_stop()` are confirmed by the device's acknowledgement of the command, an empty `0x0028` reply, instead of by a play state. A command that changes nothing, such as a stop on a hub that is already stopped, produces no play state, so it used to raise `ConfirmationTimeout` after the full timeout although it had been accepted. Measured on a Platin Stereo Hub: the acknowledgement arrives within about 10 ms, also when nothing changes.
