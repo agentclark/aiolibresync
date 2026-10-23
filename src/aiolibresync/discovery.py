@@ -22,7 +22,7 @@ import contextlib
 import itertools
 import logging
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
@@ -33,6 +33,9 @@ from .const import (
     DESCRIPTION_PATH,
     DISCOVERY_TIMEOUT,
     HTTP_TIMEOUT,
+    LSSDP_PORT,
+    LSSDP_QUERY,
+    LSSDP_TIMEOUT,
     MAX_DESCRIPTION_BYTES,
     MAX_SSDP_CANDIDATES,
     MEDIA_PORT,
@@ -341,6 +344,80 @@ async def async_read_serial(
 
 
 @dataclass(frozen=True, slots=True)
+class LssdpInfo:
+    """What a hub says about itself on Libre's own discovery port.
+
+    `module` is the Libre module before `::` in `SOURCE_LIST`, `LS9` on the
+    original Stereo Hub and `LS10` on the newer ones, whose 7777 needs TLS. It
+    tells the generations apart before anything touches 7777.
+    """
+
+    module: str | None = None
+    model: str | None = None
+    firmware: str | None = None
+    media_port: int | None = None
+
+
+def parse_lssdp(datagram: bytes) -> LssdpInfo | None:
+    """An LSSDP `200 OK`, or None if `datagram` is not one."""
+    if not datagram.startswith(b"HTTP/1.1 200"):
+        return None
+    headers = parse_ssdp_headers(datagram)
+    if "source_list" not in headers and "fwversion" not in headers:
+        return None
+    module = headers.get("source_list", "").partition("::")[0] or None
+    port = headers.get("port", "")
+    return LssdpInfo(
+        module=module,
+        model=headers.get("cast_model") or None,
+        firmware=headers.get("fwversion") or None,
+        media_port=int(port) if port.isdigit() else None,
+    )
+
+
+async def async_query_lssdp(
+    host: str,
+    *,
+    timeout: float = LSSDP_TIMEOUT,  # noqa: ASYNC109 — see async_probe_control
+) -> LssdpInfo | None:
+    """Ask `host` alone on Libre's discovery port. None if it does not answer.
+
+    The query is sent again every half second until the answer or `timeout`:
+    it is one UDP datagram. Nothing in it changes the hub.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(
+            host, LSSDP_PORT, family=socket.AF_INET, type=socket.SOCK_DGRAM
+        )
+    except OSError:
+        return None
+    address = str(infos[0][4][0])
+    answer: asyncio.Future[LssdpInfo] = loop.create_future()
+
+    class _Listener(asyncio.DatagramProtocol):
+        def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
+            if str(addr[0]) != address or answer.done():
+                return
+            if (info := parse_lssdp(data)) is not None:
+                answer.set_result(info)
+
+    transport, _protocol = await loop.create_datagram_endpoint(
+        _Listener, local_addr=("0.0.0.0", 0), family=socket.AF_INET
+    )
+    try:
+        deadline = loop.time() + timeout
+        while (remaining := deadline - loop.time()) > 0:
+            transport.sendto(LSSDP_QUERY, (address, LSSDP_PORT))
+            with contextlib.suppress(TimeoutError):
+                return await asyncio.wait_for(asyncio.shield(answer), min(0.5, remaining))
+    finally:
+        transport.close()
+    _LOGGER.debug("%s did not answer on LSSDP", host)
+    return None
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveredDevice:
     """A hub on the network, as its UPnP description presents it.
 
@@ -358,6 +435,8 @@ class DiscoveredDevice:
     manufacturer: str | None = None
     description_url: str | None = None
     control_port: int = CONTROL_PORT
+    #: From LSSDP, on `async_probe` only: see `LssdpInfo.module`.
+    module: str | None = None
 
 
 async def async_discover(
@@ -536,6 +615,23 @@ async def async_probe(
     control_port = port or CONTROL_PORT
     if not await async_probe_control(host, control_port, timeout=timeout):
         return None
+    (location, description), lssdp = await asyncio.gather(
+        _async_describe(host, timeout=timeout), async_query_lssdp(host, timeout=LSSDP_TIMEOUT)
+    )
+    module = lssdp.module if lssdp is not None else None
+    if description is None:
+        _LOGGER.debug("%s answers on %d but served no description", host, control_port)
+        return DiscoveredDevice(host=host, control_port=control_port, module=module)
+    assert location is not None
+    return replace(_discovered(host, location, description, control_port), module=module)
+
+
+async def _async_describe(
+    host: str,
+    *,
+    timeout: float,  # noqa: ASYNC109 — see async_probe_control
+) -> tuple[str | None, DeviceDescription | None]:
+    """The description of the hub at `host`, and where it was found."""
     # There is no LOCATION header on this path, so the description URL is first
     # the one this hub has always served. `URLBase` inside the document is no
     # help: it is baked at boot and still carries the hub's old address.
@@ -548,7 +644,4 @@ async def async_probe(
         if searched is not None and searched != location:
             location = searched
             description = await async_fetch_description(location, timeout=timeout)
-    if description is None:
-        _LOGGER.debug("%s answers on %d but served no description", host, control_port)
-        return DiscoveredDevice(host=host, control_port=control_port)
-    return _discovered(host, location, description, control_port)
+    return (location if description is not None else None), description

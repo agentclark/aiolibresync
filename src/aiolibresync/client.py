@@ -66,6 +66,11 @@ class LibreSyncClient:
     Both ports are required and neither is a superset of the other: 50006
     reports source changes and carries volume, mute and source in one frame,
     7777 reports transport, metadata and position.
+
+    Except with `media=False`, for the newer hubs whose 7777 is wrapped in
+    mutual TLS: the client then uses 50006 alone, is available when 50006 is,
+    and the 7777 commands raise `NotConnectedError` as they do when that port
+    is down. Power, source and what 50006 reports still work.
     """
 
     def __init__(
@@ -78,8 +83,10 @@ class LibreSyncClient:
         max_delay: float = RECONNECT_MAX,
         confirm_timeout: float = CONFIRM_TIMEOUT,
         poll_interval: float = POLL_INTERVAL,
+        media: bool = True,
     ) -> None:
         self.host = host
+        self.media = media
         self._confirm_timeout = confirm_timeout
         self._poll_interval = poll_interval
         self._state = DeviceState()
@@ -136,11 +143,11 @@ class LibreSyncClient:
         # impose with `asyncio.timeout`: on expiry the client disconnects too.
         timeout: float | None = None,  # noqa: ASYNC109
     ) -> None:
-        """Open both sockets and start the poll loop.
+        """Open both sockets, or 50006 alone with `media=False`, and start the poll loop.
 
         They keep themselves open from here on. Without `timeout` this returns
         once the sockets are *scheduled*, and never raises. With it, it also
-        waits until both ports are open, and raises `NotConnectedError` if they
+        waits until the ports are open, and raises `NotConnectedError` if they
         are not within `timeout` seconds. On that error, and on cancellation,
         the client is disconnected again before the exception propagates, so a
         failed attempt leaves nothing running.
@@ -152,7 +159,8 @@ class LibreSyncClient:
         would go on polling a device the integration has already thrown away.
         """
         await self._control.start()
-        await self._media.start()
+        if self.media:
+            await self._media.start()
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop(), name="aiolibresync-poll")
         if timeout is None or self._state.available:
@@ -162,7 +170,7 @@ class LibreSyncClient:
         except ConfirmationTimeout as err:
             await self.async_disconnect()
             raise NotConnectedError(
-                f"{self.host} did not answer on both ports within {timeout} s"
+                f"{self.host} did not answer on its ports within {timeout} s"
             ) from err
         except asyncio.CancelledError:
             await self.async_disconnect()
@@ -248,7 +256,8 @@ class LibreSyncClient:
         Not the poll loop, and free to raise: a caller asked for this one.
         """
         await self._control.send(*systemcontrol.CONNECT_QUERIES)
-        await self._media.send(*media.CONNECT_QUERIES)
+        if self.media:
+            await self._media.send(*media.CONNECT_QUERIES)
 
     async def _on_control_connect(self, conn: Connection) -> None:
         await conn.send(*systemcontrol.CONNECT_QUERIES)
@@ -402,7 +411,9 @@ class LibreSyncClient:
         7777 answers even when the hub is powered down, so conflating them is
         the single most likely bug in this project.
         """
-        self._apply({"available": self._control.connected and self._media.connected})
+        self._apply(
+            {"available": self._control.connected and (self._media.connected or not self.media)}
+        )
 
     def _notify_waiters(self, patch: dict[str, Any], new: DeviceState) -> None:
         """Resolve the futures a command's confirmation waits on.

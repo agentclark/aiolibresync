@@ -60,9 +60,11 @@ from .client import LibreSyncClient
 from .const import CONTROL_PORT, MEDIA_PORT, POLL_INTERVAL
 from .discovery import (
     DiscoveredDevice,
+    LssdpInfo,
     async_discover,
     async_probe,
     async_probe_control,
+    async_query_lssdp,
     async_read_serial,
 )
 from .exceptions import (
@@ -87,6 +89,7 @@ __all__ = [
     "DiscoveredDevice",
     "LibreSyncClient",
     "LibreSyncError",
+    "LssdpInfo",
     "NotConnectedError",
     "NowPlaying",
     "PlayState",
@@ -95,5 +98,6 @@ __all__ = [
     "async_discover",
     "async_probe",
     "async_probe_control",
+    "async_query_lssdp",
     "async_read_serial",
 ]

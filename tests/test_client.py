@@ -1240,3 +1240,27 @@ async def test_a_unit_without_a_valid_serial_has_none_and_nothing_unknown(hub):
     assert client.diagnostics()["state"]["serial"] is None
     assert client.diagnostics()["unknown_frames"]["media"] == []
     await client.async_disconnect()
+
+
+async def test_without_media_the_client_uses_50006_alone(hub):
+    """The newer hubs, whose 7777 is wrapped in TLS: never touched, and not
+    needed for the hub to be available."""
+    client = make_client(hub, media=False)
+    await client.async_connect(timeout=2.0)
+    await until(lambda: client.state.source is not None)
+
+    assert client.state.available is True
+    assert client.state.power is True
+    assert client.state.source == Source(index=0, name="Streaming")
+    assert open_sockets(hub) == (1, 0)
+    assert hub.received["media"] == []
+
+    await client.async_select_source(6)
+    assert client.state.source is not None
+    assert client.state.source.index == 6
+    with pytest.raises(NotConnectedError):
+        await client.async_set_volume(30)
+    await client.async_refresh()
+    assert hub.received["media"] == []
+    await client.async_disconnect()
+    assert client.state.available is False
