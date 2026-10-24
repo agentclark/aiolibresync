@@ -11,6 +11,10 @@ Modelled on observed behaviour, not on what would be convenient:
 
 import asyncio
 import json
+import ssl
+from dataclasses import dataclass
+
+import trustme
 
 from aiolibresync.const import (
     CLASS_EQ,
@@ -104,10 +108,52 @@ def device_frame(mid: int, payload: bytes = b"", status: int = STATUS_REPLY) -> 
     return frame[:6] + media_crc(frame).to_bytes(2, "big") + frame[8:]
 
 
-class FakeHub:
-    """Both ports on ephemeral local sockets."""
+@dataclass(frozen=True)
+class FakeTLS:
+    """Both ends of a mutual-TLS 7777, signed by a CA that exists for one test.
 
-    def __init__(self) -> None:
+    Generated in memory on every call to `make`: no certificate or key is
+    stored in this repository, and none belongs here. The hub's end is shaped
+    like the newer hubs' 7777: TLS 1.2 at most, a client certificate required,
+    and a certificate that does not name the address it is reached at — which
+    is why the client's end verifies the chain and not the host name.
+    """
+
+    hub: ssl.SSLContext
+    client: ssl.SSLContext
+    #: Trusts the hub, presents nothing: what a hub that wants a client
+    #: certificate has to refuse.
+    client_without_certificate: ssl.SSLContext
+
+    @classmethod
+    def make(cls) -> "FakeTLS":
+        ca = trustme.CA()
+        hub = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        hub.maximum_version = ssl.TLSVersion.TLSv1_2
+        hub.verify_mode = ssl.CERT_REQUIRED
+        ca.issue_cert("hub.invalid").configure_cert(hub)
+        ca.configure_trust(hub)
+
+        def client_context() -> ssl.SSLContext:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            ca.configure_trust(context)
+            return context
+
+        client = client_context()
+        ca.issue_cert("client.invalid").configure_cert(client)
+        return cls(hub=hub, client=client, client_without_certificate=client_context())
+
+
+class FakeHub:
+    """Both ports on ephemeral local sockets.
+
+    With `media_ssl`, 7777 speaks TLS with that context, as on the newer hubs;
+    50006 is plain TCP either way, as it is on every hub.
+    """
+
+    def __init__(self, media_ssl: ssl.SSLContext | None = None) -> None:
+        self.media_ssl = media_ssl
         self.power = True
         self.volume = 28
         self.muted = False
@@ -143,7 +189,9 @@ class FakeHub:
 
     async def start(self) -> None:
         self._control = await asyncio.start_server(self._handle_control, "127.0.0.1", 0)
-        self._media = await asyncio.start_server(self._handle_media, "127.0.0.1", 0)
+        self._media = await asyncio.start_server(
+            self._handle_media, "127.0.0.1", 0, ssl=self.media_ssl
+        )
 
     async def stop(self) -> None:
         """Close every client first, then the servers. Safe to call twice.

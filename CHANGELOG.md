@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `LibreSyncClient(media_ssl=...)` opens port 7777 over TLS with an `ssl.SSLContext` from the caller, for the newer hubs whose 7777 is wrapped in mutual TLS. The frames inside the tunnel are the same, so registration, volume, transport and metadata work as on the original hub. Port 50006 stays plain TCP. The library bundles no certificate and builds no context. Measured on a Platin Surround Hub.
+- A TLS handshake that fails takes the same reconnect backoff as a host that is down, and is logged at warning level once per run of failures, then at debug level.
+- `media_ssl` together with `media=False` raises `ValueError`.
+
 ## 0.6.0b2 — 2026-10-23
 
 - The unicast M-SEARCH that `async_probe` sends to a single host names the multicast group in its `HOST` header, as a multicast search does. The Stereo Hub HT ignores a search that names its own address, so 0.6.0b1 found no description on it and the hub had no identity. The original Stereo Hub answers either form.

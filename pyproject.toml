@@ -32,6 +32,9 @@ dev = [
     # on code nobody touched.
     "ruff>=0.16.3,<0.17",
     "mypy>=1.11",
+    # Mints a throwaway CA per test for the TLS 7777 of the newer hubs, so that
+    # no certificate or key has to be stored in the repository.
+    "trustme>=1.0",
 ]
 
 [project.urls]

@@ -73,6 +73,10 @@ With a `timeout`, `async_connect()` returns once both ports are open, and raises
 
 Every command waits for the device to confirm the new state and raises `ConfirmationTimeout` if it does not.
 
+### The newer hubs
+
+On the Stereo Hub HT and the Surround Hub (module `LS10`, see `async_query_lssdp`), port 7777 is wrapped in mutual TLS. Either pass `media=False` to use port 50006 alone, or pass `media_ssl`, an `ssl.SSLContext` carrying a client certificate the hub accepts, and the client works as it does on the original hub. The library bundles no certificate, reads no file and builds no context. Loading a certificate with `load_cert_chain` is blocking I/O, so in Home Assistant build the context in the executor. See [docs/protocol-media.md](docs/protocol-media.md#tls-on-the-newer-hubs).
+
 ## Things that will surprise you
 
 **Power is not power.** Switching the hub off is a *stop*: it ends the playback session. Switching it back on restores nothing and only allows playback again. When playback starts on a hub that is off, power-on arrives *last*, as a consequence of the session starting. The hub answers on both ports while "off". Keep `available` and `power` apart.

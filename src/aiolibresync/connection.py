@@ -5,12 +5,14 @@ powers off and changes IP, and an integration that gives up after N attempts is
 one the user has to restart by hand.
 
 The two ports share this class but not a codec — the framings genuinely differ,
-and pretending otherwise costs more than it saves.
+and pretending otherwise costs more than it saves. They can differ in transport
+too: on the newer hubs 7777 is wrapped in TLS, and the frames inside are the same.
 """
 
 import asyncio
 import logging
 import random
+import ssl
 from collections.abc import Awaitable, Callable
 
 from .exceptions import NotConnectedError
@@ -54,6 +56,14 @@ async def cancel_and_wait(task: asyncio.Task[None]) -> None:
             raise
 
 
+class _HandshakeError(OSError):
+    """The TCP connect succeeded and the TLS handshake over it did not.
+
+    An OSError, so it takes the same backoff as a host that is down, but its own
+    type, so the log can say which of the two it was.
+    """
+
+
 class Connection:
     """A reconnecting reader/writer pair for one port."""
 
@@ -68,9 +78,11 @@ class Connection:
         on_connect: Callable[["Connection"], Awaitable[None]] | None = None,
         base_delay: float,
         max_delay: float,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.host = host
         self.port = port
+        self._ssl_context = ssl_context
         self._reader_factory = reader_factory
         self._on_frame = on_frame
         self._on_availability = on_availability
@@ -81,6 +93,7 @@ class Connection:
         self._task: asyncio.Task[None] | None = None
         self._connected = False
         self._ready = False
+        self._handshake_reported = False
         self.resyncs = 0
 
     @property
@@ -98,7 +111,8 @@ class Connection:
 
         Exact by construction, which is what the 7777 registration wants —
         better than guessing with a UDP socket, and it cannot fall back to
-        127.0.0.1.
+        127.0.0.1. A TLS transport answers it from the socket underneath, so it
+        is the same address with or without `ssl_context`.
 
         Never None during `on_connect`: `_writer` is assigned with no
         intervening await, so a hook's None check is defensive-by-invariant.
@@ -156,20 +170,59 @@ class Connection:
             except OSError as err:
                 raise NotConnectedError(f"{self.host}:{self.port} dropped mid-write") from err
 
+    async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect, and with an `ssl_context`, run the TLS handshake over the socket.
+
+        Two steps rather than `open_connection(ssl=...)`, because a refused
+        handshake and a host that is down otherwise fail alike: a hub that
+        rejects the client certificate under TLS 1.2 may just reset the
+        connection, which is the same ConnectionResetError a rebooting hub
+        produces. The first is a configuration problem the user has to hear
+        about; the second is routine.
+
+        `server_hostname` is the host, as `open_connection` would pass it. With
+        an IP address no SNI is sent, and whether the certificate has to name
+        that address is the context's `check_hostname`, the caller's decision.
+        """
+        reader, writer = await asyncio.open_connection(self.host, self.port)
+        if self._ssl_context is None:
+            return reader, writer
+        try:
+            await writer.start_tls(self._ssl_context, server_hostname=self.host)
+        except OSError as err:
+            writer.close()
+            raise _HandshakeError(f"TLS handshake failed: {err!r}") from err
+        except BaseException:
+            writer.close()
+            raise
+        return reader, writer
+
     async def _run(self) -> None:
         attempt = 0
         while True:
             try:
-                reader, writer = await asyncio.open_connection(self.host, self.port)
+                reader, writer = await self._open()
             except OSError as err:
                 delay = backoff_delay(attempt, self._base_delay, self._max_delay)
-                _LOGGER.debug(
-                    "%s:%s unreachable (%s); retrying in %.1fs", self.host, self.port, err, delay
-                )
+                if isinstance(err, _HandshakeError):
+                    # A wrong certificate fails every attempt for ever, and the
+                    # backoff tops out at a minute: warn once per failing streak.
+                    log = _LOGGER.debug if self._handshake_reported else _LOGGER.warning
+                    self._handshake_reported = True
+                    log("%s:%s: %s; retrying in %.1fs", self.host, self.port, err, delay)
+                else:
+                    _LOGGER.debug(
+                        "%s:%s unreachable (%s); retrying in %.1fs",
+                        self.host,
+                        self.port,
+                        err,
+                        delay,
+                    )
                 attempt += 1
                 await asyncio.sleep(delay)
                 continue
 
+            self._handshake_reported = False
             self._writer = writer
             self._connected = True
             _LOGGER.debug("connected to %s:%s", self.host, self.port)

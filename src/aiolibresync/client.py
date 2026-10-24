@@ -9,6 +9,7 @@ other clients are also driving.
 
 import asyncio
 import logging
+import ssl
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
@@ -71,6 +72,15 @@ class LibreSyncClient:
     mutual TLS: the client then uses 50006 alone, is available when 50006 is,
     and the 7777 commands raise `NotConnectedError` as they do when that port
     is down. Power, source and what 50006 reports still work.
+
+    Or, on those hubs, with `media_ssl`: a context carrying a client
+    certificate the hub accepts. 7777 is then opened over TLS and everything
+    above works as on the original hub, because the frames inside the tunnel
+    are the same. 50006 stays plain TCP either way, as it is on every hub.
+    The library builds no context and reads no file: which certificate to
+    present, and whether to verify the hub's, is the caller's. Building one
+    is blocking I/O (`load_cert_chain` reads the files), so in Home Assistant
+    it belongs in the executor, not on the event loop.
     """
 
     def __init__(
@@ -84,7 +94,12 @@ class LibreSyncClient:
         confirm_timeout: float = CONFIRM_TIMEOUT,
         poll_interval: float = POLL_INTERVAL,
         media: bool = True,
+        media_ssl: ssl.SSLContext | None = None,
     ) -> None:
+        if media_ssl is not None and not media:
+            # Two answers to the same hub, and silently preferring either one
+            # would hide a caller bug that decides whether 7777 is used at all.
+            raise ValueError("media_ssl is for port 7777, which media=False leaves unused")
         self.host = host
         self.media = media
         self._confirm_timeout = confirm_timeout
@@ -132,6 +147,7 @@ class LibreSyncClient:
             on_connect=self._on_media_connect,
             base_delay=base_delay,
             max_delay=max_delay,
+            ssl_context=media_ssl,
         )
 
     # --- lifecycle ----------------------------------------------------------

@@ -22,6 +22,14 @@ The port stays up when the hub looks "off" (network standby), and the registrati
 
 > **Do not sweep this port.** Because the command field is a message-box id, an arbitrary value reaches whatever the bus attaches to that box, and somewhere in that space are factory reset and firmware upgrade. Port 50006 cannot reach those; port 7777 can. Send only boxes whose effect is known.
 
+### TLS on the newer hubs
+
+On the hubs built around Libre's `LS10` module, the Stereo Hub HT and the Surround Hub, port 7777 is wrapped in TLS 1.2 with mutual authentication: the hub presents a certificate and requires one from the client. `async_query_lssdp` tells the module before anything touches 7777. Port 50006 stays plain TCP on these hubs.
+
+Inside the tunnel nothing changes (`tested` on a Surround Hub). The frames, the byte order and the registration with the client's own address are the ones described below, and registration, volume read and set, transport and now-playing metadata all worked through it unchanged. The hub's certificate is not issued for its IP address, so a client that verifies it has to leave host-name checking off.
+
+`LibreSyncClient(media_ssl=...)` takes a ready `ssl.SSLContext` carrying a client certificate the hub accepts, and opens 7777 with it. The library bundles no certificate, reads no file and builds no context. Without one, `media=False` runs the client on port 50006 alone.
+
 ## Frame format
 
 Both directions share one 10-byte header followed by the payload.

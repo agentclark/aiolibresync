@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+import logging
 import socket
 
 import pytest
 from conftest import tap_log_frames, until
-from fakes import FakeHub, device_frame
+from fakes import FakeHub, FakeTLS, device_frame
 
 from aiolibresync import media
 from aiolibresync.client import LibreSyncClient
@@ -19,7 +20,7 @@ from aiolibresync.const import (
     STATUS_NOT_REGISTERED,
 )
 from aiolibresync.exceptions import ConfirmationTimeout, NotConnectedError
-from aiolibresync.frames import media_command, media_crc
+from aiolibresync.frames import MEDIA_HEADER, media_command, media_crc
 from aiolibresync.state import DeviceState, PlayState, Source
 
 
@@ -1264,3 +1265,87 @@ async def test_without_media_the_client_uses_50006_alone(hub):
     assert hub.received["media"] == []
     await client.async_disconnect()
     assert client.state.available is False
+
+
+# --- 7777 over TLS, on the newer hubs -----------------------------------------
+
+
+@pytest.fixture
+def tls():
+    return FakeTLS.make()
+
+
+@pytest.fixture
+async def tls_hub(tls):
+    hub = FakeHub(media_ssl=tls.hub)
+    await hub.start()
+    yield hub
+    await hub.stop()
+
+
+def is_tls(conn) -> bool:
+    """Whether a live connection runs over TLS, from its own transport.
+
+    Reaching into the client's private connections: the hub's view cannot tell
+    a TLS 7777 from a plain one, since the frames inside are the same.
+    """
+    assert conn._writer is not None
+    return conn._writer.get_extra_info("ssl_object") is not None
+
+
+async def test_with_media_ssl_7777_runs_over_tls_and_nothing_else_changes(tls_hub, tls):
+    """Registration, the connect queries, pushes and commands, exactly as on
+    the original hub, with the host given as an IP address."""
+    client = make_client(tls_hub, media_ssl=tls.client)
+    await client.async_connect(timeout=2.0)
+    await until(lambda: client.state.model is not None)
+
+    assert client.state.available is True
+    assert is_tls(client._media)
+    assert not is_tls(client._control)
+    assert client.state.volume == 28
+    assert client.state.play_state is not None
+    register = next(
+        f for f in tls_hub.received["media"] if media_command(f, from_device=False) == MID_REGISTER
+    )
+    assert register[MEDIA_HEADER:] == b"127.0.0.1"
+
+    await client.async_set_volume(30)
+    assert tls_hub.volume == 30
+    await client.async_media_pause()
+    tls_hub.push_media(device_frame(MID_VOLUME, b"35"))
+    await until(lambda: client.state.volume == 35)
+    await client.async_disconnect()
+    assert client.state.available is False
+
+
+async def test_without_media_ssl_7777_stays_plain_tcp(hub):
+    client = make_client(hub)
+    await client.async_connect(timeout=2.0)
+
+    assert client.state.available is True
+    assert not is_tls(client._media)
+    assert not is_tls(client._control)
+    assert registrations(hub) == 1
+    await client.async_disconnect()
+
+
+async def test_a_refused_handshake_backs_off_and_warns_once(tls_hub, tls, caplog):
+    """The hub wants a client certificate and gets none. The client keeps
+    trying, with backoff, says so once at warning level, and stays unavailable
+    without taking 50006 or its own teardown down with it."""
+    caplog.set_level(logging.DEBUG, logger="aiolibresync.connection")
+    client = make_client(tls_hub, media_ssl=tls.client_without_certificate)
+    with pytest.raises(NotConnectedError):
+        await client.async_connect(timeout=0.5)
+
+    failures = [r for r in caplog.records if "TLS handshake failed" in r.getMessage()]
+    assert len(failures) >= 2
+    assert [r.levelno for r in failures].count(logging.WARNING) == 1
+    assert tls_hub.received["media"] == []
+    assert client.state.available is False
+
+
+def test_media_ssl_with_media_false_is_refused(tls):
+    with pytest.raises(ValueError, match="media_ssl"):
+        LibreSyncClient("127.0.0.1", media=False, media_ssl=tls.client)
